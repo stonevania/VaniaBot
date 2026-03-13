@@ -49,11 +49,17 @@ class Config:
         taglog("CONFIG", f"User {user} is not authorized to use the bot.")
         return False
     
-    # PluggingConfig methods
+    # Plugging methods
     def confirm(self, message: discord.Message, test_string: str, ignore_channels=False) -> bool:
         return self.plugging.confirm(message, test_string, ignore_channels=ignore_channels)
     
-    # AutoModerationConfig methods
+    async def send_to_social_networks(self, message: discord.Message, ctx) -> bool:
+        return await self.plugging.send_to_social_networks(message, ctx)
+    
+    async def test_social_network(self, message: discord.Message, ctx, service: str):
+        return await self.plugging.test_social_network(message, ctx, service)
+
+    # Auto-moderation methods
     def log_suspicious_activity(self, user: discord.User, reason: str | None) -> str | None:
         if not self.authorized(user, user.guild):
             return self.auto_moderation.log_suspicious_activity(user, reason)
@@ -63,8 +69,6 @@ class Config:
         if not self.authorized(message.author, message.guild):
             return self.auto_moderation.check_message(message)
         return None
-        
-        
 
 script_dir = Path(__file__).parent
 file_path = script_dir / "config.json"
@@ -95,11 +99,11 @@ def get_config() -> Config:
                 watched_channels=plugs_data.get("watched_channels", []),
                 watched_users=plugs_data.get("watched_users", []),
                 keywords=plugs_data.get("keywords", []),
-                twitter=ServiceConfig(**plugs_data.get("twitter")) if plugs_data.get("twitter") else None,
-                bluesky=ServiceConfig(**plugs_data.get("bluesky")) if plugs_data.get("bluesky") else None,
-                facebook=ServiceConfig(**plugs_data.get("facebook")) if plugs_data.get("facebook") else None,
-                reddit=ServiceConfig(**plugs_data.get("reddit")) if plugs_data.get("reddit") else None,
-                instagram=ServiceConfig(**plugs_data.get("instagram")) if plugs_data.get("instagram") else None
+                twitter_config=ServiceConfig(**plugs_data.get("twitter")) if plugs_data.get("twitter") else None,
+                bluesky_config=ServiceConfig(**plugs_data.get("bluesky")) if plugs_data.get("bluesky") else None,
+                facebook_config=ServiceConfig(**plugs_data.get("facebook")) if plugs_data.get("facebook") else None,
+                reddit_config=ServiceConfig(**plugs_data.get("reddit")) if plugs_data.get("reddit") else None,
+                instagram_config=ServiceConfig(**plugs_data.get("instagram")) if plugs_data.get("instagram") else None
             )
 
             auto_mod_data = data.get("auto_moderation", {})

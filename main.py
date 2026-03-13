@@ -5,8 +5,16 @@ import logging
 import os
 
 # helper imports
+import bluesky
 from config import get_config, set_config
 from logs import getLogger, taglog
+
+class DummyCtx:
+    def __init__(self, message):
+        self.message = message
+
+    async def reply(self, msg):
+        await self.message.reply(msg)
 
 # set up environment
 load_dotenv()
@@ -120,15 +128,15 @@ async def removeuser(ctx, user: discord.User):
 # ================================================================================================ #
 # ====================================== PLUG CONFIGURATION ====================================== #
 # ================================================================================================ #
-@bot.command(name='pluggingenabled', help='Enables or disables social network auto-plugging')
-async def pluggingenabled(ctx, enabled: bool):
+@bot.command(name='plugging_enabled', help='Enables or disables social network auto-plugging')
+async def plugging_enabled(ctx, enabled: bool):
     if await is_authorized(ctx.author, ctx.guild):
         config.plugging.enabled = enabled
         await ctx.send(f'Social network auto-plugging enabled: {enabled}')
         set_config(config)
 
-@bot.command(name='watchchannel', help='Adds a channel to the list of channels to watch for auto-plugging')
-async def watchchannel(ctx, channel: discord.TextChannel):
+@bot.command(name='plugging_watchchannel', help='Adds a channel to the list of channels to watch for auto-plugging')
+async def plugging_watchchannel(ctx, channel: discord.TextChannel):
     if await is_authorized(ctx.author, ctx.guild):
         if channel.id not in config.plugging.watched_channels:
             config.plugging.watched_channels.append(channel.id)
@@ -137,8 +145,8 @@ async def watchchannel(ctx, channel: discord.TextChannel):
         else:
             await ctx.send(f'Channel {channel.name} is already being watched.')
 
-@bot.command(name='unwatchchannel', help='Removes a channel from the list of channels to watch for auto-plugging')
-async def unwatchchannel(ctx, channel: discord.TextChannel):
+@bot.command(name='plugging_unwatchchannel', help='Removes a channel from the list of channels to watch for auto-plugging')
+async def plugging_unwatchchannel(ctx, channel: discord.TextChannel):
     if await is_authorized(ctx.author, ctx.guild):
         if channel.id in config.plugging.watched_channels:
             config.plugging.watched_channels.remove(channel.id)
@@ -147,8 +155,8 @@ async def unwatchchannel(ctx, channel: discord.TextChannel):
         else:
             await ctx.send(f'Channel {channel.name} is not being watched.')
 
-@bot.command(name='watchuser', help='Adds a user to the list of users to watch for auto-plugging')
-async def watchuser(ctx, user: discord.User):
+@bot.command(name='plugging_watchuser', help='Adds a user to the list of users to watch for auto-plugging')
+async def plugging_watchuser(ctx, user: discord.User):
     if await is_authorized(ctx.author, ctx.guild):
         if user.id not in config.plugging.watched_users:
             config.plugging.watched_users.append(user.id)
@@ -157,8 +165,8 @@ async def watchuser(ctx, user: discord.User):
         else:
             await ctx.send(f'User {user.name} is already being watched.')
 
-@bot.command(name='unwatchuser', help='Removes a user from the list of users to watch for auto-plugging')
-async def unwatchuser(ctx, user: discord.User):
+@bot.command(name='plugging_unwatchuser', help='Removes a user from the list of users to watch for auto-plugging')
+async def plugging_unwatchuser(ctx, user: discord.User):
     if await is_authorized(ctx.author, ctx.guild):
         if user.id in config.plugging.watched_users:
             config.plugging.watched_users.remove(user.id)
@@ -167,8 +175,8 @@ async def unwatchuser(ctx, user: discord.User):
         else:
             await ctx.send(f'User {user.name} is not being watched.')
 
-@bot.command(name='addkeyword', help='Adds a keyword to the list of keywords for auto-plugging')
-async def addkeyword(ctx, keyword: str):
+@bot.command(name='plugging_addkeyword', help='Adds a keyword to the list of keywords for auto-plugging')
+async def plugging_addkeyword(ctx, keyword: str):
     if await is_authorized(ctx.author, ctx.guild):
         if keyword not in config.plugging.keywords:
             config.plugging.keywords.append(keyword)
@@ -177,8 +185,8 @@ async def addkeyword(ctx, keyword: str):
         else:
             await ctx.send(f'Keyword "{keyword}" is already in the list of keywords.')
 
-@bot.command(name='removekeyword', help='Removes a keyword from the list of keywords for auto-plugging')
-async def removekeyword(ctx, keyword: str):
+@bot.command(name='plugging_removekeyword', help='Removes a keyword from the list of keywords for auto-plugging')
+async def plugging_removekeyword(ctx, keyword: str):
     if await is_authorized(ctx.author, ctx.guild):
         if keyword in config.plugging.keywords:
             config.plugging.keywords.remove(keyword)
@@ -186,6 +194,48 @@ async def removekeyword(ctx, keyword: str):
             set_config(config)
         else:
             await ctx.send(f'Keyword "{keyword}" is not in the list of keywords.')
+
+# Bluesky configuration commands
+@bot.command(name='plugging_disablebluesky', help='Disables auto-plugging to Bluesky')
+async def plugging_disablebluesky(ctx):
+    if await is_authorized(ctx.author, ctx.guild):
+        if not config.plugging.bluesky_config.enabled:
+            await ctx.send('Auto-plugging to Bluesky is already disabled.')
+            return
+        config.plugging.disable_service("bluesky")
+        await ctx.send('Auto-plugging to Bluesky disabled.')
+        set_config(config)
+
+@bot.command(name='plugging_configurebluesky', help='Configures auto-plugging to Bluesky')
+async def plugging_configurebluesky(ctx, username: str, password: str):
+    taglog("MAIN", f"plugging_configurebluesky: {ctx.author.name}")
+    # Delete the command message to avoid exposing credentials
+    try:
+        await ctx.message.delete()
+    except Exception as e:
+        taglog("MAIN", f"Failed to delete command message: {e}")
+
+    if await is_authorized(ctx.author, ctx.guild):
+        if config.plugging.bluesky_config.enabled:
+            return await ctx.send(f'Auto-plugging to Bluesky is already configured. Use {config.bot.command_prefix}plugging_disablebluesky to disable it first.')
+        
+        config.plugging.enable_service("bluesky", username, password)
+        set_config(config)
+
+        if not await bluesky.login(ctx, config.plugging.bluesky_config):
+            config.plugging.disable_service("bluesky")
+            set_config(config)
+            
+            return await ctx.send('Failed to log in to Bluesky with the provided credentials. Please check your username and password.')
+        
+        await ctx.send('Auto-plugging to Bluesky configured.')
+        set_config(config)
+
+@bot.command(name='plugging_testbluesky', help='Tests auto-plugging to Bluesky')
+async def plugging_testbluesky(ctx, message: discord.Message):
+    if await is_authorized(ctx.author, ctx.guild):
+        # Implementation for testing Bluesky integration
+        pass
 
 # ================================================================================================ #
 # ===================================== AUTOMOD CONFIGURATION ==================================== #
@@ -315,12 +365,12 @@ async def on_member_remove(member):
     if member.id in config.permitted_users:
         taglog("MAIN", f"on_member_remove: removing {member.id} from permitted users")
         config.permitted_users.remove(member.id)
-        set_config(config, member.guild.id)
+        set_config(config)
         await reportModerationEvent(f"User {member.name} ({member.id}) has left the server and was removed from the list of permitted users.")
     if member.id in config.plugging.watched_users:
         taglog("MAIN", f"on_member_remove: removing {member.id} from watched users")
         config.plugging.watched_users.remove(member.id)
-        set_config(config, member.guild.id)
+        set_config(config)
         await reportModerationEvent(f"User {member.name} ({member.id}) has left the server and was removed from the list of watched users.")
 
     config.auto_moderation.remove_user_reports(str(member.id))
@@ -335,12 +385,15 @@ async def on_message(message):
     # Check the message against the auto-moderation rules first
     ban_reason = config.check_message(message)
     if ban_reason:
-        return await ban(message.author, message.guild, reason="spamming or suspicious activity detected by auto-moderation")
+        await ban(message.author, message.guild, reason="spamming or suspicious activity detected by auto-moderation")
+        return await bot.process_commands(message)
     
     # Check the message against the plugging configuration rules
     # If there's a match, send the message to any configured social network(s)
     if config.confirm(message, message.content):
         taglog("MAIN", f"on_message: message from {message.author.name} in {message.channel.name} confirmed for auto-plugging")
+        dummy_ctx = DummyCtx(message)
+        await config.send_to_social_networks(message, dummy_ctx)
         return await bot.process_commands(message)
 
     # NOTE: always required, this function is effectively an override allows continued
