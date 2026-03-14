@@ -12,23 +12,8 @@ from logs import getLogger, taglog
 load_dotenv()
 config = get_config()  # Load the configuration from config.json
 
-# Set up intents
-# NOTE: May need to activate more and/or disable some as the project needs; see 
-# https://discordpy.readthedocs.io/en/stable/intents.html for more information!
-intents = discord.Intents.default()
-intents.guilds = True
-intents.members = True
-intents.message_content = True
-intents.dm_messages = True
-
-# Configure bot to watch for prefix commands with given intents
-bot = commands.Bot(command_prefix=config.bot.command_prefix, intents=intents)
-
-# ========================================================================== #
-# ========================================================================== #
-# ============= ALL BOT-RELATED COMMANDS MUST BE INSERTED BELOW ============ #
-# ========================================================================== #
-# ========================================================================== #
+async def load_extensions():
+    await bot.load_extension("cogs.botconfig")
 
 # ========================================================================== #
 # ============================== HELPER METHODS ============================ #
@@ -77,45 +62,21 @@ async def ban(user: discord.User, guild: discord.Guild, reason: str = "Auto-bann
         taglog("MAIN", f"Failed to ban user {user.name}: {e}")
         await reportModerationEvent(f"**ERROR**: Failed to ban user {user.name}. Reason: {e}")
 
-# Test basic command to check if bot is running
-@bot.command(name='ping', help='Responds with pong to test if bot is running')
-async def ping(ctx):
-    taglog("MAIN", f"ping: {ctx.author.name}")
-    if await is_authorized(ctx.author, ctx.guild):
-        await ctx.send('pong')
+# Set up intents
+# NOTE: May need to activate more and/or disable some as the project needs; see 
+# https://discordpy.readthedocs.io/en/stable/intents.html for more information!
+intents = discord.Intents.default()
+intents.guilds = True
+intents.members = True
+intents.message_content = True
+intents.dm_messages = True
 
-# ========================================================================== #
-# ============================ BOT CONFIGURATION =========================== #
-# ========================================================================== #
-@bot.command(name='setrole', help='Sets the role that is allowed to configure the bot')
-async def setrole(ctx, role: discord.Role):
-    taglog("MAIN", f"setrole: {ctx.author.name}")
-    if await is_authorized(ctx.author, ctx.guild):
-        config.bot.configuration_role = role.name
-        await ctx.send(f'Configuration role set to {role.name}')
-        set_config(config)
-
-@bot.command(name='adduser', help='Adds a user to the list of permitted users')
-async def adduser(ctx, user: discord.User):
-    taglog("MAIN", f"adduser: {ctx.author.name}")
-    if await is_authorized(ctx.author, ctx.guild):
-        if user.id not in config.bot.permitted_users:
-            config.bot.permitted_users.append(user.id)
-            await ctx.send(f'User {user.name} added to permitted users.')
-            set_config(config)
-        else:
-            await ctx.send(f'User {user.name} is already a permitted user.')
-
-@bot.command(name='removeuser', help='Removes a user from the list of permitted users')
-async def removeuser(ctx, user: discord.User):
-    taglog("MAIN", f"removeuser: {ctx.author.name}")
-    if await is_authorized(ctx.author, ctx.guild):
-        if user.id in config.bot.permitted_users:
-            config.bot.permitted_users.remove(user.id)
-            await ctx.send(f'User {user.name} removed from permitted users.')
-            set_config(config)
-        else:
-            await ctx.send(f'User {user.name} is not a permitted user.')
+# Configure and run the bot
+bot = commands.Bot(command_prefix=config.bot.command_prefix, intents=intents)
+bot.config = config
+bot.set_config = set_config
+bot.is_authorized = is_authorized
+bot.taglog = taglog
 
 # ========================================================================== #
 # =========================== PLUG CONFIGURATION =========================== #
@@ -339,6 +300,14 @@ async def social_addyoutubechannel(ctx, channel: str):
 # ========================================================================== #
 # ================================= EVENTS ================================= #
 # ========================================================================== #
+@bot.event
+async def setup_hook():
+    taglog("MAIN", "Loading extensions...")
+    await load_extensions()
+    taglog("MAIN", f"Syncing application commands...")
+    synced = await bot.tree.sync()
+    taglog("MAIN", f"Synced {len(synced)} application command(s).")
+
 @bot.event
 async def on_ready():
     taglog("MAIN", f'Logged in as {bot.user.name} - {bot.user.id}')

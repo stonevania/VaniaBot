@@ -73,10 +73,10 @@ class Config:
         
 
 script_dir = Path(__file__).parent
-file_path = script_dir / "config.json"
+file_path = script_dir / "../config.json"
 
 def get_config() -> Config:
-    if not file_path.exists():
+    if not file_path.exists() or file_path.stat().st_size == 0:
         taglog("CONFIG", "Config file does not exist, creating default config.json")
         default_config = Config()
         set_config(default_config)
@@ -124,6 +124,8 @@ def get_config() -> Config:
                 polling_interval=social_data.get("polling_interval", 60),
                 upload_channel=social_data.get("upload_channel", None),
                 live_channel=social_data.get("live_channel", None),
+                upload_notification_role=social_data.get("upload_notification_role", None),
+                live_notification_role=social_data.get("live_notification_role", None),
                 youtube_channels=social_data.get("youtube_channels", []),
                 twitch_channels=social_data.get("twitch_channels", [])
             )
