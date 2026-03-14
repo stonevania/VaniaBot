@@ -79,9 +79,11 @@ class SocailConfigCog(commands.Cog):
     @app_commands.command(name='configureuploadnotifications', description='Configure how upload notifications are handled by the bot.')
     @app_commands.describe(channel='The channel in which to post new upload notifications.', role='The role to use to tag when posting the upload notification. If none is provided, @everyone will be used by default.')
     async def configureuploadnotifications(self, interaction: discord.Interaction, channel: discord.TextChannel, role: discord.Role | None):
-        self.taglog("SocailConfigCog", f"configureuploadnotifications [{channel.name} | {role.name}]")
+        role_name = "everyone" if role is None else role.name
+        role_id = None if role is None else role.id
+        self.taglog("SocailConfigCog", f"configureuploadnotifications [{channel.name} | {role_name}]")
         if await self._authorize_interaction(interaction):
-            self.config.social_config.configure_upload_notifications(channel.id, role.id)
+            self.config.social_config.configure_upload_notifications(channel.id, role_id)
             self.set_config(self.config)
 
             role_name = role.name if role else "everyone"
@@ -95,9 +97,11 @@ class SocailConfigCog(commands.Cog):
     @app_commands.command(name='configurelivenotifications', description='Configure how live notifications are handled by the bot.')
     @app_commands.describe(channel='The channel in which to post live notifications.', role='The role to use to tag when posting the live notification. If none is provided, @everyone will be used by default.')
     async def configurelivenotifications(self, interaction: discord.Interaction, channel: discord.TextChannel, role: discord.Role | None):
-        self.taglog("SocailConfigCog", f"configurelivenotifications [{channel.name} | {role.name}]")
+        role_name = "everyone" if role is None else role.name
+        role_id = None if role is None else role.id
+        self.taglog("SocailConfigCog", f"configurelivenotifications [{channel.name} | {role_name}]")
         if await self._authorize_interaction(interaction):
-            self.config.social_config.configure_live_notifications(channel.id, role.id)
+            self.config.social_config.configure_live_notifications(channel.id, role_id)
             self.set_config(self.config)
 
             role_name = role.name if role else "everyone"

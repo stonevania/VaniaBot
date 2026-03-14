@@ -26,7 +26,7 @@ class YouTube:
         self.taglog("YouTube", "Starting YouTube polling...")
         while True:
             try:
-                await self.check_for_new_videos()
+                await self.check_for_new_content()
             except Exception as e:
                 self.taglog("YouTube", f"Error during polling: {e}")
 
@@ -150,7 +150,7 @@ class YouTube:
     def get_playlist_id(self, channel_id: str) -> str | None:
         self.taglog("YouTube", f"Getting latest upload playlist for {channel_id}...")
 
-        # Example response found in .ref/youtube.channelListResponse.json
+        # Example response found in .ref/youtube.latest_videos_playlist_respons.json
         response = self.youtube.channels().list(
             part="contentDetails",
             id=channel_id
@@ -178,7 +178,7 @@ class YouTube:
 
         return uploads_playlist_id
     
-    # Example response found in .ref/youtube.playlistItemListResponse.json
+    # Example response found in .ref/youtube.latest_video_response.json
     def get_latest_upload(self, uploads_playlist_id: str) -> dict | None:
         response = self.youtube.playlistItems().list(
             part="snippet,contentDetails",
@@ -199,7 +199,24 @@ class YouTube:
 
         return items[0]
     
-    async def check_for_new_videos(self):
+    def get_latest_live(self, channel_id: str):
+        # Example response found in .ref/youtube.latest_live_response.json
+        response = self.youtube.search().list(
+            part="snippet",
+            channelId=channel_id,
+            type="video",
+            eventType="live",
+            maxResults=1
+        ).execute()
+
+        items = response.get("items", [])
+        if not items:
+            # We should do nothing here because this just means that the channel is not currently live
+            return None
+
+        return items[0]
+    
+    async def check_for_new_content(self):
         self.taglog("YouTube", "Checking for new content on monitored YouTube channels...")
 
         for channel in self.social_config.youtube_channels or []:
@@ -210,33 +227,75 @@ class YouTube:
                 self.taglog("YouTube", error_message)
                 self._schedule_unexpected_youtube_state_notification(error_message)
                 continue
-
+            
             playlist_id = self.get_playlist_id(channel_id)
+            # Error is handled in get_playlist_id because we can include the response there, but if we
+            # don't get a playlist_id here, move on.
+            if playlist_id is None:
+                continue
+            
             latest_upload = self.get_latest_upload(playlist_id)
-            last_notification = channel.get("last_notification", None)
+            last_video_notification = channel.get("last_video_notification", None)
+            await self.handle_new_upload(channel, last_video_notification, latest_upload)
 
-            # Don't send upload notificaiton as this is the first time we are fetching a new upload,
-            # BUT we should set this so that the next time we come through and find a different ID, we
-            # DO send an upload notification.
-            if latest_upload and not last_notification:
-                self.taglog("YouTube", f"First ever upload fetched for {channel_url}, log and do nothing...")
-                channel["last_notification"] = latest_upload
-                self.social_config.register_new_upload(channel, "youtube")
-                self.set_config(self.config)
-                continue
-            
-            if last_notification and last_notification.get("id", None) != latest_upload.get("id", None):
-                self.taglog("YouTube", f"New upload fetched for {channel_url}, send a social notification!")
-                if await self.post_to_discord(latest_upload, channel_url):
-                    channel["last_notification"] = latest_upload
-                    self.social_config.register_new_upload(channel, "youtube")
+            if channel.get("lives", False):
+                latest_live = self.get_latest_live(channel_id)
+                last_live_notification = channel.get("last_live_notification", None)
+                await self.handle_new_live(channel, last_live_notification, latest_live)
+
+    async def handle_new_live(self, channel: dict, last_live_notification: dict, latest_live: dict):
+        channel_url = channel.get("url", None)
+
+        # Don't send upload notificaiton as this is the first time we are fetching a new upload,
+        # BUT we should set this so that the next time we come through and find a different ID, we
+        # DO send an upload notification.
+        if latest_live and not last_live_notification:
+            self.taglog("YouTube", f"First ever live fetched for {channel_url}, log and do nothing...")
+            channel["last_live_notification"] = latest_live
+            self.social_config.register_new_content(channel)
+            self.set_config(self.config)
+            return
+        
+        if last_live_notification and latest_live:
+            notification_id = last_live_notification.get("id", {}).get("videoId", None)
+            live_id = latest_live.get("id", {}).get("videoId", None)
+            if notification_id != live_id:
+                self.taglog("YouTube", f"New live fetched for {channel_url}, send a social notification!")
+                if await self.post_live_to_discord(latest_live, channel_url):
+                    channel["last_live_notification"] = latest_live
+                    self.social_config.register_new_content(channel)
                     self.set_config(self.config)
-                    continue
-                continue
-            
-            self.taglog("YouTube", f"No new uploads fetched for {channel_url}...")
+                    return
+                return
+        
+        self.taglog("YouTube", f"No new lives fetched for {channel_url}...")
     
-    async def post_to_discord(self, upload: dict, channel_url: str) -> bool:
+    async def handle_new_upload(self, channel: dict, last_video_notification: dict, latest_upload: dict):
+        channel_url = channel.get("url", None)
+
+        # Don't send upload notificaiton as this is the first time we are fetching a new upload,
+        # BUT we should set this so that the next time we come through and find a different ID, we
+        # DO send an upload notification.
+        if latest_upload and not last_video_notification:
+            self.taglog("YouTube", f"First ever upload fetched for {channel_url}, log and do nothing...")
+            channel["last_video_notification"] = latest_upload
+            self.social_config.register_new_content(channel)
+            self.set_config(self.config)
+            return
+        
+        if last_video_notification and latest_upload:
+            if last_video_notification.get("id", None) != latest_upload.get("id", None):
+                self.taglog("YouTube", f"New upload fetched for {channel_url}, send a social notification!")
+                if await self.post_upload_to_discord(latest_upload, channel_url):
+                    channel["last_video_notification"] = latest_upload
+                    self.social_config.register_new_content(channel)
+                    self.set_config(self.config)
+                    return
+                return
+        
+        self.taglog("YouTube", f"No new uploads fetched for {channel_url}...")
+    
+    async def post_upload_to_discord(self, upload: dict, channel_url: str) -> bool:
         upload_channel_id = self.social_config.upload_channel
         if upload_channel_id:
             discord_channel = self.bot.get_channel(upload_channel_id)
@@ -323,3 +382,96 @@ class YouTube:
         else:
             self.taglog("YouTube", "Upload notification channel is not configured.")
             return False
+
+    async def post_live_to_discord(self, live_video: dict, channel_url: str) -> bool:
+        live_channel_id = self.social_config.live_channel
+        if not live_channel_id:
+            self.taglog("YouTube", "Live notification channel is not configured.")
+            return False
+
+        discord_channel = self.bot.get_channel(live_channel_id)
+        if not discord_channel:
+            self.taglog("YouTube", f"Live notification channel with ID {live_channel_id} not found.")
+            return False
+
+        snippet = live_video.get("snippet", {})
+        if snippet.get("liveBroadcastContent") != "live":
+            self.taglog("YouTube", "Live result was not marked as actively live.")
+            return False
+
+        video_id = live_video.get("id", {}).get("videoId")
+        youtube_channel_id = snippet.get("channelId")
+        channel_title = snippet.get("channelTitle", channel_url)
+        stream_title = snippet.get("title", "Live now on YouTube")
+        video_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else channel_url
+
+        thumbnails = snippet.get("thumbnails", {})
+        image_url = (
+            thumbnails.get("high", {}).get("url")
+            or thumbnails.get("medium", {}).get("url")
+            or thumbnails.get("default", {}).get("url")
+        )
+
+        published_at = (
+            snippet.get("publishedAt")
+            or snippet.get("publishTime")
+        )
+
+        role_id = self.social_config.live_notification_role
+        role_mention = f"<@&{role_id}>" if role_id else "@everyone"
+        author_icon_url = None
+
+        if youtube_channel_id:
+            try:
+                channel_response = self.youtube.channels().list(
+                    part="snippet",
+                    id=youtube_channel_id
+                ).execute()
+                channel_items = channel_response.get("items", [])
+                if channel_items:
+                    channel_thumbnails = channel_items[0].get("snippet", {}).get("thumbnails", {})
+                    author_icon_url = (
+                        channel_thumbnails.get("high", {}).get("url")
+                        or channel_thumbnails.get("medium", {}).get("url")
+                        or channel_thumbnails.get("default", {}).get("url")
+                    )
+            except Exception as e:
+                self.taglog("YouTube", f"Failed to fetch channel avatar for {youtube_channel_id}: {e}")
+
+        embed = discord.Embed(
+            color=discord.Color.red(),
+            url=video_url
+        )
+        embed.title = stream_title
+
+        if author_icon_url:
+            embed.set_author(
+                name=f"{channel_title} is live on YouTube",
+                url=channel_url,
+                icon_url=author_icon_url
+            )
+        else:
+            embed.set_author(
+                name=f"{channel_title} is live on YouTube",
+                url=channel_url
+            )
+
+        if image_url:
+            embed.set_image(url=image_url)
+
+        if published_at:
+            try:
+                published_dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+                embed.timestamp = published_dt
+                embed.set_footer(text="Started")
+            except ValueError:
+                pass
+
+        await self.bot.loop.create_task(
+            discord_channel.send(
+                content=role_mention,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
+            )
+        )
+        return True

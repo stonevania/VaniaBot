@@ -90,7 +90,8 @@ class SocialConfig:
             channel_json = {
                 "url": url,
                 "lives": lives,
-                "last_notification": None
+                "last_live_notification": None,
+                "last_video_notification": None
             }
             self.youtube_channels.append(channel_json)
             return f"Success: Added `{url} [{channel_json}]`."
@@ -147,8 +148,9 @@ class SocialConfig:
     def confirm_url(self, url: str) -> bool:
         return self.get_url_platform(url) is not None
     
-    def register_new_upload(self, channel: dict, platform: str):
+    def register_new_content(self, channel: dict):
         channel_url = channel.get("url", None)
+        platform = self.get_url_platform(channel_url)
 
         if platform == "youtube":
            self.youtube_channels = [
