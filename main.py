@@ -2,11 +2,10 @@ from dotenv import load_dotenv
 from discord.ext import commands
 import discord
 import logging
-import os
 
-# helper imports
 from config.config import get_config, set_config
 from logs import getLogger, taglog
+from youtube import YouTube
 
 # set up environment
 load_dotenv()
@@ -275,6 +274,14 @@ async def setup_hook():
 async def on_ready():
     taglog("MAIN", f'Logged in as {bot.user.name} - {bot.user.id}')
     taglog("MAIN", 'Bot is ready to receive commands.')
+
+    # Start Twitch polling
+    # twitch.begin_polling()
+
+    # Start YouTube polling
+    if not hasattr(bot, "youtube"):
+        bot.youtube = YouTube(bot)
+    bot.youtube.start_polling()
 
 # A user left or was removed from a guild
 # VaniaBot should only do something under the following conditions:

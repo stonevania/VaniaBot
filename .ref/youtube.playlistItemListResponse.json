@@ -1,0 +1,62 @@
+{
+    "kind": "youtube#playlistItemListResponse",
+    "etag": "zTqHkDamFqklFREzaba2HRaUcpA",
+    "nextPageToken": "EAAaHlBUOkNBRWlFRUUxTkRRd016QkVRalpFUmtFM09ESQ",
+    "items": [
+        {
+            "kind": "youtube#playlistItem",
+            "etag": "qX3xChe5HvdwlRDRDa6Oh3mW2aY",
+            "id": "VVV1akNLX1M2cjA5eGFtZGs5Wjd5ajVRLklLcVFfMzZIdjhR",
+            "snippet": {
+                "publishedAt": "2026-03-04T20:00:30Z",
+                "channelId": "UCujCK_S6r09xamdk9Z7yj5Q",
+                "title": "Minecraft Has a Denny’s Now?? | Stonevania S2 SMP #gaming #shorts #minecraft",
+                "description": "Well, hello there, everyone, and welcome to StoneVania Season 2. Step with me into a land of mystery, fun, and probably more than a few shenanigans as we explore, create, and learn with fellow StoneVanian’s! Prepare for adventures as we explore the unknown and work together to accomplish something fantastic.\n\nAs always, thanks for tuning in! Until next time have fun and God bless… BYE!\n\nIf yo\"d like to support the channel, you can do so on Patreon or Ko-Fi:\nhttps://www.patreon.com/dadmannwalking\nhttps://ko-fi.com/dadmannwalking\n\nCome join the dadmannwalking Discord community:\nhttps://discord.gg/FeMyTzCpq9\n\nCome join the StoneVania Discord community: \nhttps://discord.gg/y5sCa8nswA\n\n#minecraft #vanilla #gaming #smp #stonevania #build #base #aesthetic #community",
+                "thumbnails": {
+                    "default": {
+                        "url": "https://i.ytimg.com/vi/IKqQ_36Hv8Q/default.jpg",
+                        "width": 120,
+                        "height": 90
+                    },
+                    "medium": {
+                        "url": "https://i.ytimg.com/vi/IKqQ_36Hv8Q/mqdefault.jpg",
+                        "width": 320,
+                        "height": 180
+                    },
+                    "high": {
+                        "url": "https://i.ytimg.com/vi/IKqQ_36Hv8Q/hqdefault.jpg",
+                        "width": 480,
+                        "height": 360
+                    },
+                    "standard": {
+                        "url": "https://i.ytimg.com/vi/IKqQ_36Hv8Q/sddefault.jpg",
+                        "width": 640,
+                        "height": 480
+                    },
+                    "maxres": {
+                        "url": "https://i.ytimg.com/vi/IKqQ_36Hv8Q/maxresdefault.jpg",
+                        "width": 1280,
+                        "height": 720
+                    }
+                },
+                "channelTitle": "dadmannwalking",
+                "playlistId": "UUujCK_S6r09xamdk9Z7yj5Q",
+                "position": 0,
+                "resourceId": {
+                    "kind": "youtube#video",
+                    "videoId": "IKqQ_36Hv8Q"
+                },
+                "videoOwnerChannelTitle": "dadmannwalking",
+                "videoOwnerChannelId": "UCujCK_S6r09xamdk9Z7yj5Q"
+            },
+            "contentDetails": {
+                "videoId": "IKqQ_36Hv8Q",
+                "videoPublishedAt": "2026-03-04T20:00:30Z"
+            }
+        }
+    ],
+    "pageInfo": {
+        "totalResults": 275,
+        "resultsPerPage": 1
+    }
+}

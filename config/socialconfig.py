@@ -70,8 +70,8 @@ class SocialConfig:
             new_channel_count = len(self.youtube_channels or []) + len(self.twitch_channels or [])
 
             if old_channel_count != new_channel_count:
-                return f"Fail: Channel `{url}` is not currently monitored."
-            return f"Success: Channel `{url}` was removed."
+                return f"Success: Channel `{url}` was removed."
+            return f"Fail: Channel `{url}` is not currently monitored."
         
         # Otherwise, determine platform then overwrite the appropriate values if it exists
         # or add if it doesn't
@@ -146,3 +146,15 @@ class SocialConfig:
 
     def confirm_url(self, url: str) -> bool:
         return self.get_url_platform(url) is not None
+    
+    def register_new_upload(self, channel: dict, platform: str):
+        channel_url = channel.get("url", None)
+
+        if platform == "youtube":
+           self.youtube_channels = [
+                channel if item.get("url") == channel_url else item
+                for item in self.youtube_channels or []
+            ]
+
+        if platform == "twitch":
+            print("not implemented yet")
