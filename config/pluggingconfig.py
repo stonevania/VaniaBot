@@ -2,7 +2,7 @@
 from typing import List, Optional
 import discord
 
-from serviceconfig import ServiceConfig
+from config.serviceconfig import ServiceConfig
 from logs import taglog
 
 class PluggingConfig:

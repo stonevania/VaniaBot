@@ -2,29 +2,36 @@ from pathlib import Path
 import os
 import discord
 
+from config.socialconfig import SocialConfig
 from logs import taglog
-from botconfig import BotConfig
-from pluggingconfig import PluggingConfig
-from automodconfig import AutoModerationConfig
-from serviceconfig import ServiceConfig
+from config.botconfig import BotConfig
+from config.pluggingconfig import PluggingConfig
+from config.automodconfig import AutoModerationConfig
+from config.serviceconfig import ServiceConfig
+from config.youtubeconfig import YouTubeConfig
 
 class Config:
     def __init__(
             self,
             bot: BotConfig = BotConfig(),
             plugging: PluggingConfig = PluggingConfig(),
-            auto_moderation: AutoModerationConfig = AutoModerationConfig()):
+            auto_moderation: AutoModerationConfig = AutoModerationConfig(),
+            social_config: SocialConfig = SocialConfig()):
         self.bot = bot
         self.plugging = plugging
         self.auto_moderation = auto_moderation
+        self.social_config = social_config
 
+        # NEVER STORE SENSITIVE INFORMATION IN THE CONFIG FILE. ALWAYS USE ENVIRONMENT VARIABLES FOR SENSITIVE INFORMATION.
         self.token = os.getenv("DISCORD_TOKEN")
+        self.youtube_api_key = os.getenv("YOUTUBE_API_KEY")
 
     def json(self) -> dict:
         obj = {}
         obj["bot"] = self.bot.json()
         obj["plugs"] = self.plugging.json()
         obj["auto_moderation"] = self.auto_moderation.json()
+        obj["social"] = self.social_config.json()
         return obj
     
     def authorized(self, user: discord.User, guild: discord.Guild) -> bool:
@@ -112,10 +119,17 @@ def get_config() -> Config:
                 maximum_reports_timestamp_threshold=auto_mod_data.get("maximum_reports_timestamp_threshold", 3600)
             )
 
+            social_data = data.get("social", {})
+            social_config = SocialConfig(
+                enabled=social_data.get("enabled", False),
+                youtube_config=YouTubeConfig(**social_data.get("youtube", {}))
+            )
+
             return Config(
                 bot=bot,
                 plugging=plugging,
-                auto_moderation=auto_moderation
+                auto_moderation=auto_moderation,
+                social_config=social_config
             )
     except Exception as e:
         taglog("CONFIG", f"Error loading config: {e}")
