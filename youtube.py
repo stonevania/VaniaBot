@@ -32,6 +32,34 @@ class YouTube:
 
             await asyncio.sleep(self.social_config.polling_interval or 60)
 
+    async def _notify_unexpected_youtube_state(self, message: str):
+        reporting_channel_id = self.config.auto_moderation.reporting_channel
+
+        if reporting_channel_id:
+            channel = self.bot.get_channel(reporting_channel_id)
+            if channel:
+                try:
+                    await channel.send(f"**ERROR**: {message}")
+                    return
+                except Exception as e:
+                    self.taglog("YouTube", f"Failed to send auto-moderation alert: {e}")
+
+        for guild in self.bot.guilds:
+            owner = guild.owner or await guild.fetch_owner()
+            if owner is None:
+                continue
+
+            try:
+                await owner.send(f"VaniaBot detected an unexpected YouTube state in {guild.name}: {message}")
+            except Exception as e:
+                self.taglog("YouTube", f"Failed to DM guild owner for {guild.name}: {e}")
+
+    def _schedule_unexpected_youtube_state_notification(self, message: str):
+        try:
+            asyncio.create_task(self._notify_unexpected_youtube_state(message))
+        except RuntimeError as e:
+            self.taglog("YouTube", f"Failed to schedule YouTube alert: {e}")
+
     def _search_for_channel_id(self, query: str, expected_custom_url: str | None = None) -> str | None:
         self.taglog("YouTube", f"Searching for channel id with query {query}...")
 
@@ -130,16 +158,25 @@ class YouTube:
 
         items = response.get("items", [])
         if not items:
-            # TODO: If we get here, something probably changed, so this error should be more visible.
-            self.taglog("YouTube", f"Channel not found: {channel_id}")
+            error_message = f"Channel not found: {channel_id}"
+            self.taglog("YouTube", f"{error_message} [{response}]")
+            self._schedule_unexpected_youtube_state_notification(error_message)
             return None
 
         if len(items) == 0:
             self.taglog("YouTube", "Channel has no playlists")
             return None
         
-        # TODO: Is there a safer way to get to this data?
-        return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        uploads_playlist_id = (
+            items[0].get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
+        )
+        if uploads_playlist_id is None:
+            error_message = f"Uploads playlist not found for channel {channel_id}"
+            self.taglog("YouTube", f"{error_message} [{response}]")
+            self._schedule_unexpected_youtube_state_notification(error_message)
+            return None
+
+        return uploads_playlist_id
     
     # Example response found in .ref/youtube.playlistItemListResponse.json
     def get_latest_upload(self, uploads_playlist_id: str) -> dict | None:
@@ -151,8 +188,9 @@ class YouTube:
   
         items = response.get("items", [])
         if not items:
-            # TODO: If we get here, something probably changed, so this error should be more visible.
-            self.taglog("YouTube", f"Channel not found: {uploads_playlist_id}")
+            error_message = f"YouTube playlist returned no items for uploads playlist {uploads_playlist_id}"
+            self.taglog("YouTube", f"{error_message} [{response}]")
+            self._schedule_unexpected_youtube_state_notification(error_message)
             return None
         
         if len(items) == 0:
@@ -168,8 +206,9 @@ class YouTube:
             channel_url = channel.get("url", None)
             channel_id = self.get_channel_id(channel_url)
             if channel_id is None:
-                # TODO: If we get here, something probably changed, so this error should be more visible.
-                self.taglog("YouTube", f"Channel ID not found: {channel_id}")
+                error_message = f"Channel ID not found for configured YouTube channel URL: {channel_url}"
+                self.taglog("YouTube", error_message)
+                self._schedule_unexpected_youtube_state_notification(error_message)
                 continue
 
             playlist_id = self.get_playlist_id(channel_id)
@@ -203,6 +242,10 @@ class YouTube:
             discord_channel = self.bot.get_channel(upload_channel_id)
             if discord_channel:
                 snippet = upload.get("snippet", {})
+                youtube_channel_id = (
+                    snippet.get("channelId")
+                    or snippet.get("videoOwnerChannelId")
+                )
                 video_id = (
                     upload.get("contentDetails", {}).get("videoId")
                     or snippet.get("resourceId", {}).get("videoId")
@@ -221,13 +264,41 @@ class YouTube:
                 published_at = snippet.get("publishedAt")
                 role_id = self.social_config.upload_notification_role
                 role_mention = f"<@&{role_id}>" if role_id else "@everyone"
+                author_icon_url = None
+
+                if youtube_channel_id:
+                    try:
+                        channel_response = self.youtube.channels().list(
+                            part="snippet",
+                            id=youtube_channel_id
+                        ).execute()
+                        channel_items = channel_response.get("items", [])
+                        if channel_items:
+                            channel_thumbnails = channel_items[0].get("snippet", {}).get("thumbnails", {})
+                            author_icon_url = (
+                                channel_thumbnails.get("high", {}).get("url")
+                                or channel_thumbnails.get("medium", {}).get("url")
+                                or channel_thumbnails.get("default", {}).get("url")
+                            )
+                    except Exception as e:
+                        self.taglog("YouTube", f"Failed to fetch channel avatar for {youtube_channel_id}: {e}")
 
                 embed = discord.Embed(
-                    description=f"**{channel_title}** published a new video on YouTube",
                     color=discord.Color.red(),
                     url=video_url
                 )
                 embed.title = video_title
+                if author_icon_url:
+                    embed.set_author(
+                        name=f"{channel_title} published a new video on YouTube",
+                        url=channel_url,
+                        icon_url=author_icon_url
+                    )
+                else:
+                    embed.set_author(
+                        name=f"{channel_title} published a new video on YouTube",
+                        url=channel_url
+                    )
                 if image_url:
                     embed.set_image(url=image_url)
                 if published_at:
