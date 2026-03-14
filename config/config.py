@@ -8,7 +8,6 @@ from config.botconfig import BotConfig
 from config.pluggingconfig import PluggingConfig
 from config.automodconfig import AutoModerationConfig
 from config.serviceconfig import ServiceConfig
-from config.youtubeconfig import YouTubeConfig
 
 class Config:
     def __init__(
@@ -122,7 +121,11 @@ def get_config() -> Config:
             social_data = data.get("social", {})
             social_config = SocialConfig(
                 enabled=social_data.get("enabled", False),
-                youtube_config=YouTubeConfig(**social_data.get("youtube", {}))
+                polling_interval=social_data.get("polling_interval", 60),
+                upload_channel=social_data.get("upload_channel", None),
+                live_channel=social_data.get("live_channel", None),
+                youtube_channels=social_data.get("youtube_channels", []),
+                twitch_channels=social_data.get("twitch_channels", [])
             )
 
             return Config(

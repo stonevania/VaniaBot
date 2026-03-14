@@ -299,6 +299,44 @@ async def automod_removeignoredrole(ctx, role: discord.Role):
             await ctx.send(f'Role {role.name} is not in the list of ignored roles.')
 
 # ========================================================================== #
+# ========================== SOCIAL CONFIGURATION ========================== #
+# ========================================================================== #
+@bot.command(name='social_setenabled', help='')
+async def social_setenabled(ctx, enabled: bool):
+    if await is_authorized(ctx.author, ctx.guild):
+        config.social_config.enabled = enabled
+        set_config(config)
+        await ctx.send(f'Social notifications enabled: {enabled}')
+
+@bot.command(name='social_setpollinginterval', help='')
+async def socail_setpollinginterval(ctx, interval: int):
+    if await is_authorized(ctx.author, ctx.guild):
+        config.social_config.polling_interval = interval
+        set_config(config)
+        await ctx.send(f'Social notifications polling interval set to {interval}')
+        
+@bot.command(name='social_setuploadnotificationchannel', help='')
+async def social_setuploadnotificationchannel(ctx, channel: discord.TextChannel):
+    if await is_authorized(ctx.author, ctx.guild):
+        config.social_config.upload_channel = channel.id
+        set_config(config)
+        await ctx.send(f'Upload notifications will now be published to {channel.name}')
+        
+@bot.command(name='social_setlivenotificationchannel', help='')
+async def social_setlivenotificationchannel(ctx, channel: discord.TextChannel):
+    if await is_authorized(ctx.author, ctx.guild):
+        config.social_config.live_channel = channel.id
+        set_config(config)
+        await ctx.send(f'Live notifications will now be published to {channel.name}')
+
+@bot.command(name='social_addyoutubechannel', help='')
+async def social_addyoutubechannel(ctx, channel: str):
+    if await is_authorized(ctx.author, ctx.guild):
+        if await config.add_youtube_channel(channel):
+            set_config(config)
+            await ctx.send(f'{channel} will now be monitored for new uploads')
+
+# ========================================================================== #
 # ================================= EVENTS ================================= #
 # ========================================================================== #
 @bot.event
