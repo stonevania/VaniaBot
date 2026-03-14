@@ -13,7 +13,8 @@ load_dotenv()
 config = get_config()  # Load the configuration from config.json
 
 async def load_extensions():
-    await bot.load_extension("cogs.botconfig")
+    await bot.load_extension("cogs.botconfigcog")
+    await bot.load_extension("cogs.socialconfigcog")
 
 # ========================================================================== #
 # ============================== HELPER METHODS ============================ #

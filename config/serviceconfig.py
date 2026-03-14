@@ -27,6 +27,7 @@ class ServiceConfig:
 
     def json(self) -> dict:
         obj = {}
+        obj["service"] = self.service
         obj["enabled"] = self.enabled
 
         if self.username:

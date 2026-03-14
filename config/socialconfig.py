@@ -31,3 +31,15 @@ class SocialConfig:
         obj["youtube_channels"] = self.youtube_channels
         obj["twitch_channels"] = self.twitch_channels
         return obj
+    
+    def set_enabled(self, enabled: bool, polling_interval: int = 60):
+        self.enabled = enabled
+        self.polling_interval = polling_interval
+
+        if not enabled:
+            self.upload_channel = None
+            self.live_channel = None
+            self.upload_notification_role = None
+            self.live_notification_role = None
+            self.youtube_channels = None
+            self.twitch_channels = None
