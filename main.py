@@ -5,6 +5,7 @@ import logging
 
 from config.config import get_config, set_config
 from logs import getLogger, taglog
+from twitch import Twitch
 from youtube import YouTube
 
 # set up environment
@@ -276,7 +277,9 @@ async def on_ready():
     taglog("MAIN", 'Bot is ready to receive commands.')
 
     # Start Twitch polling
-    # twitch.begin_polling()
+    if not hasattr(bot, "twitch"):
+        bot.twitch = Twitch(bot)
+    bot.twitch.start_polling()
 
     # Start YouTube polling
     if not hasattr(bot, "youtube"):
