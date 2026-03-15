@@ -16,10 +16,17 @@ class YouTube:
         self.set_config = bot.set_config
 
         self.api_key = os.getenv("YOUTUBE_API_KEY")
-        self.youtube = build("youtube", "v3", developerKey=self.api_key)
+        self.youtube = None
         self.should_stop = False
         self.polling_task = None
         self.quota_backoff_until = 0.0
+
+        try:
+            self.youtube = build("youtube", "v3", developerKey=self.api_key)
+        except Exception as e:
+            self.taglog("YouTube", f"Failed to initialize YouTube client: {e}")
+            self._schedule_unexpected_youtube_state_notification(f"Failed to initialize YouTube client [{e}]")
+            raise
 
     def start_polling(self):
         self.should_stop = False
@@ -48,8 +55,10 @@ class YouTube:
                     self.taglog("YouTube", f"{message} [{e}]")
                     self._schedule_unexpected_youtube_state_notification(message)
                 else:
+                    self._schedule_unexpected_youtube_state_notification(f"YouTube polling HTTP error [{e}]")
                     self.taglog("YouTube", f"Error during polling: {e}")
             except Exception as e:
+                self._schedule_unexpected_youtube_state_notification(f"YouTube polling error [{e}]")
                 self.taglog("YouTube", f"Error during polling: {e}")
 
             await asyncio.sleep(self.social_config.polling_interval or 60)
@@ -447,30 +456,42 @@ class YouTube:
                     except ValueError:
                         pass
 
-                await self.bot.loop.create_task(
-                    discord_channel.send(
-                        content=role_mention,
-                        embed=embed,
-                        allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
+                try:
+                    await self.bot.loop.create_task(
+                        discord_channel.send(
+                            content=role_mention,
+                            embed=embed,
+                            allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
+                        )
                     )
-                )
-                return True
+                    return True
+                except Exception as e:
+                    self._schedule_unexpected_youtube_state_notification(f"Failed to send YouTube upload notification [{e}]")
+                    raise
             else:
-                self.taglog("YouTube", f"Upload notification channel with ID {upload_channel_id} not found.")
+                message = f"Upload notification channel with ID {upload_channel_id} not found."
+                self.taglog("YouTube", message)
+                self._schedule_unexpected_youtube_state_notification(message)
                 return False
         else:
-            self.taglog("YouTube", "Upload notification channel is not configured.")
+            message = "Upload notification channel is not configured."
+            self.taglog("YouTube", message)
+            self._schedule_unexpected_youtube_state_notification(message)
             return False
 
     async def post_live_to_discord(self, channel: dict, live_video: dict, channel_url: str) -> discord.Message | None:
         live_channel_id = self.social_config.live_channel
         if not live_channel_id:
-            self.taglog("YouTube", "Live notification channel is not configured.")
+            message = "Live notification channel is not configured."
+            self.taglog("YouTube", message)
+            self._schedule_unexpected_youtube_state_notification(message)
             return None
 
         discord_channel = self.bot.get_channel(live_channel_id)
         if not discord_channel:
-            self.taglog("YouTube", f"Live notification channel with ID {live_channel_id} not found.")
+            message = f"Live notification channel with ID {live_channel_id} not found."
+            self.taglog("YouTube", message)
+            self._schedule_unexpected_youtube_state_notification(message)
             return None
 
         snippet = live_video.get("snippet", {})
@@ -528,28 +549,38 @@ class YouTube:
             except ValueError:
                 pass
 
-        return await self.bot.loop.create_task(
-            discord_channel.send(
-                content=role_mention,
-                embed=embed,
-                allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
+        try:
+            return await self.bot.loop.create_task(
+                discord_channel.send(
+                    content=role_mention,
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
+                )
             )
-        )
+        except Exception as e:
+            self._schedule_unexpected_youtube_state_notification(f"Failed to send YouTube live notification [{e}]")
+            raise
 
     async def update_live_discord_message(self, channel: dict, channel_url: str) -> bool:
         live_channel_id = self.social_config.live_channel
         if not live_channel_id:
-            self.taglog("YouTube", "Live notification channel is not configured.")
+            message = "Live notification channel is not configured."
+            self.taglog("YouTube", message)
+            self._schedule_unexpected_youtube_state_notification(message)
             return False
 
         discord_channel = self.bot.get_channel(live_channel_id)
         if not discord_channel:
-            self.taglog("YouTube", f"Live notification channel with ID {live_channel_id} not found.")
+            message = f"Live notification channel with ID {live_channel_id} not found."
+            self.taglog("YouTube", message)
+            self._schedule_unexpected_youtube_state_notification(message)
             return False
 
         message_id = channel.get("last_live_message_id")
         if not message_id:
-            self.taglog("YouTube", f"No existing live notification message found for {channel_url}.")
+            message = f"No existing live notification message found for {channel_url}."
+            self.taglog("YouTube", message)
+            self._schedule_unexpected_youtube_state_notification(message)
             return False
 
         last_live_notification = channel.get("last_live_notification", {})
@@ -572,12 +603,18 @@ class YouTube:
         try:
             message = await discord_channel.fetch_message(message_id)
         except discord.NotFound:
-            self.taglog("YouTube", f"Live notification message {message_id} was not found for {channel_url}.")
+            message = f"Live notification message {message_id} was not found for {channel_url}."
+            self.taglog("YouTube", message)
+            self._schedule_unexpected_youtube_state_notification(message)
             return False
 
-        await message.edit(
-            content=None,
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions.none()
-        )
+        try:
+            await message.edit(
+                content=None,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+        except Exception as e:
+            self._schedule_unexpected_youtube_state_notification(f"Failed to update YouTube live notification [{e}]")
+            raise
         return True
