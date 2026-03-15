@@ -87,7 +87,8 @@ class SocialConfig:
                 "url": normalized_url,
                 "lives": lives,
                 "last_live_notification": None,
-                "last_video_notification": None
+                "last_video_notification": None,
+                "last_live_message_id": None
             }
             self.youtube_channels.append(channel_json)
             return f"Success: Added `{normalized_url} [{channel_json}]`."
@@ -105,7 +106,8 @@ class SocialConfig:
             channel_json = {
                 "url": normalized_url,
                 "last_live_notification": None,
-                "last_video_notification": None
+                "last_video_notification": None,
+                "last_live_message_id": None
             }
             self.twitch_channels.append(channel_json)
             return f"Success: Added `{normalized_url} [{channel_json}]`."

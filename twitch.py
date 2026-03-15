@@ -60,6 +60,8 @@ class Twitch:
 
     async def start(self):
         self.taglog("Twtich", "Starting Twtich event sub service...")
+        self.twitch_channels = self.social_config.twitch_channels or []
+        self.channel_map = {}
         self.should_stop = False
         self.validate_token()
         self.resolve_users()
@@ -80,20 +82,6 @@ class Twitch:
         raise RuntimeError(
             "TWITCH_USER_ACCESS_TOKEN is required for Twitch EventSub WebSocket subscriptions."
         )
-
-    def fetch_app_access_token(self) -> str:
-        response = requests.post(
-            "https://id.twitch.tv/oauth2/token",
-            params={
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "grant_type": "client_credentials",
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data.get("access_token", None)
 
     def refresh_access_token(self) -> str:
         if not self.refresh_token:
@@ -261,8 +249,10 @@ class Twitch:
                 return channel
         return None
 
-    def save_live_notification(self, channel: dict, event: dict) -> None:
+    def save_live_notification(self, channel: dict, event: dict, discord_message_id: int | None = None) -> None:
         channel["last_live_notification"] = event
+        if discord_message_id is not None:
+            channel["last_live_message_id"] = discord_message_id
         self.social_config.register_new_content(channel)
         self.twitch_channels = self.social_config.twitch_channels or []
         self.set_config(self.config)
@@ -317,17 +307,20 @@ class Twitch:
                     if notification_started_at != live_started_at:
                         self.taglog("Twitch", f"New live fetched for {channel.get('url', None)}, send a social notification!")
                         content = self.format_online_message(event)
-                        await self.send_discord_message(content, event, is_live=True)
-                        self.save_live_notification(channel, event)
+                        message = await self.send_discord_message(content, event, is_live=True)
+                        if message:
+                            self.save_live_notification(channel, event, message.id if message else None)
                         return None
 
                 self.taglog("Twitch", f"No new lives fetched for {channel.get('url', None) if channel else login}...")
                 return None
 
             elif sub_type == "stream.offline":
+                login = event.get("broadcaster_user_login", "").lower()
+                channel = self.get_configured_channel(login)
                 content = self.format_offline_message(event)
                 self.taglog("Twitch", f"Offline event [{content.replace("\n", " | ")}]...")
-                await self.send_discord_message(content, event, is_live=False)
+                await self.update_discord_message(channel, content, event)
 
             else:
                 self.taglog("Twitch", f"Unhandled notification type [{sub_type}]...")
@@ -337,16 +330,16 @@ class Twitch:
         self.taglog("Twitch", f"Unhandled message type [{msg_type}]...")
         return None
     
-    async def send_discord_message(self, content: str, event: dict | None = None, is_live: bool = True) -> None:
+    async def send_discord_message(self, content: str, event: dict | None = None, is_live: bool = True) -> discord.Message | None:
         live_channel_id = self.social_config.live_channel
         if not live_channel_id:
             self.taglog("Twitch", "Live notification channel is not configured.")
-            return
+            return None
 
         discord_channel = self.bot.get_channel(live_channel_id)
         if not discord_channel:
             self.taglog("Twitch", f"Live notification channel with ID {live_channel_id} not found.")
-            return
+            return None
 
         event = event or {}
         name = event.get("broadcaster_user_name", event.get("broadcaster_user_login", "Unknown"))
@@ -374,10 +367,55 @@ class Twitch:
         role_id = self.social_config.live_notification_role if is_live else None
         message_content = f"<@&{role_id}>" if role_id else "@everyone"
 
-        await discord_channel.send(
+        return await discord_channel.send(
             content=message_content,
             embed=embed,
             allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
+        )
+
+    async def update_discord_message(self, channel: dict | None, content: str, event: dict | None = None) -> None:
+        if not channel:
+            self.taglog("Twitch", "Offline event received for an unconfigured channel.")
+            return
+
+        live_channel_id = self.social_config.live_channel
+        if not live_channel_id:
+            self.taglog("Twitch", "Live notification channel is not configured.")
+            return
+
+        discord_channel = self.bot.get_channel(live_channel_id)
+        if not discord_channel:
+            self.taglog("Twitch", f"Live notification channel with ID {live_channel_id} not found.")
+            return
+
+        message_id = channel.get("last_live_message_id")
+        if not message_id:
+            self.taglog("Twitch", f"No existing live notification message found for {channel.get('url', None)}.")
+            return
+
+        event = event or {}
+        name = event.get("broadcaster_user_name", event.get("broadcaster_user_login", "Unknown"))
+        login = event.get("broadcaster_user_login", "").lower()
+        url = f"https://www.twitch.tv/{login}" if login else "https://www.twitch.tv"
+
+        embed = discord.Embed(
+            description=content,
+            color=discord.Color.dark_grey(),
+            url=url
+        )
+        embed.title = f"{name} has gone offline"
+        embed.set_author(name=name, url=url)
+
+        try:
+            message = await discord_channel.fetch_message(message_id)
+        except discord.NotFound:
+            self.taglog("Twitch", f"Live notification message {message_id} was not found for {channel.get('url', None)}.")
+            return
+
+        await message.edit(
+            content=None,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none()
         )
 
     def format_online_message(self, event: dict) -> str:

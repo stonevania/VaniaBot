@@ -27,6 +27,9 @@ class YouTube:
     def stop(self):
         self.should_stop = True
 
+        if self.polling_task is not None:
+            self.polling_task.cancel()
+
     async def begin_polling(self):
         self.taglog("YouTube", "Starting YouTube polling...")
         while not self.should_stop:
@@ -267,11 +270,22 @@ class YouTube:
             live_id = latest_live.get("id", {}).get("videoId", None)
             if notification_id != live_id:
                 self.taglog("YouTube", f"New live fetched for {channel_url}, send a social notification!")
-                if await self.post_live_to_discord(latest_live, channel_url):
+                message = await self.post_live_to_discord(latest_live, channel_url)
+                if message:
                     channel["last_live_notification"] = latest_live
+                    channel["last_live_message_id"] = message.id
                     self.social_config.register_new_content(channel)
                     self.set_config(self.config)
                     return
+                return
+
+        if last_live_notification and not latest_live:
+            self.taglog("YouTube", f"Live ended for {channel_url}, update the existing social notification!")
+            if await self.update_live_discord_message(channel, channel_url):
+                channel["last_live_notification"] = None
+                channel["last_live_message_id"] = None
+                self.social_config.register_new_content(channel)
+                self.set_config(self.config)
                 return
         
         self.taglog("YouTube", f"No new lives fetched for {channel_url}...")
@@ -389,21 +403,21 @@ class YouTube:
             self.taglog("YouTube", "Upload notification channel is not configured.")
             return False
 
-    async def post_live_to_discord(self, live_video: dict, channel_url: str) -> bool:
+    async def post_live_to_discord(self, live_video: dict, channel_url: str) -> discord.Message | None:
         live_channel_id = self.social_config.live_channel
         if not live_channel_id:
             self.taglog("YouTube", "Live notification channel is not configured.")
-            return False
+            return None
 
         discord_channel = self.bot.get_channel(live_channel_id)
         if not discord_channel:
             self.taglog("YouTube", f"Live notification channel with ID {live_channel_id} not found.")
-            return False
+            return None
 
         snippet = live_video.get("snippet", {})
         if snippet.get("liveBroadcastContent") != "live":
             self.taglog("YouTube", "Live result was not marked as actively live.")
-            return False
+            return None
 
         video_id = live_video.get("id", {}).get("videoId")
         youtube_channel_id = snippet.get("channelId")
@@ -473,11 +487,56 @@ class YouTube:
             except ValueError:
                 pass
 
-        await self.bot.loop.create_task(
+        return await self.bot.loop.create_task(
             discord_channel.send(
                 content=role_mention,
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
             )
+        )
+
+    async def update_live_discord_message(self, channel: dict, channel_url: str) -> bool:
+        live_channel_id = self.social_config.live_channel
+        if not live_channel_id:
+            self.taglog("YouTube", "Live notification channel is not configured.")
+            return False
+
+        discord_channel = self.bot.get_channel(live_channel_id)
+        if not discord_channel:
+            self.taglog("YouTube", f"Live notification channel with ID {live_channel_id} not found.")
+            return False
+
+        message_id = channel.get("last_live_message_id")
+        if not message_id:
+            self.taglog("YouTube", f"No existing live notification message found for {channel_url}.")
+            return False
+
+        last_live_notification = channel.get("last_live_notification", {})
+        snippet = last_live_notification.get("snippet", {})
+        channel_title = snippet.get("channelTitle", channel_url)
+        stream_title = snippet.get("title", "Live ended on YouTube")
+        video_id = last_live_notification.get("id", {}).get("videoId")
+        video_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else channel_url
+
+        embed = discord.Embed(
+            color=discord.Color.dark_grey(),
+            url=video_url
+        )
+        embed.title = stream_title
+        embed.set_author(
+            name=f"{channel_title} is no longer live on YouTube",
+            url=channel_url
+        )
+
+        try:
+            message = await discord_channel.fetch_message(message_id)
+        except discord.NotFound:
+            self.taglog("YouTube", f"Live notification message {message_id} was not found for {channel_url}.")
+            return False
+
+        await message.edit(
+            content=None,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none()
         )
         return True
