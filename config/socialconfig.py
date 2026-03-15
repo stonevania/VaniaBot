@@ -86,6 +86,10 @@ class SocialConfig:
             channel_json = {
                 "url": normalized_url,
                 "lives": lives,
+                "channel_id": None,
+                "uploads_playlist_id": None,
+                "channel_title": None,
+                "channel_image_url": None,
                 "last_live_notification": None,
                 "last_video_notification": None,
                 "last_live_message_id": None

@@ -4,6 +4,7 @@ import discord
 
 from datetime import datetime
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from urllib.parse import urlparse
 
 class YouTube:
@@ -18,6 +19,7 @@ class YouTube:
         self.youtube = build("youtube", "v3", developerKey=self.api_key)
         self.should_stop = False
         self.polling_task = None
+        self.quota_backoff_until = 0.0
 
     def start_polling(self):
         self.should_stop = False
@@ -34,7 +36,17 @@ class YouTube:
         self.taglog("YouTube", "Starting YouTube polling...")
         while not self.should_stop:
             try:
+                now = asyncio.get_running_loop().time()
+                if self.quota_backoff_until > now:
+                    await asyncio.sleep(self.quota_backoff_until - now)
                 await self.check_for_new_content()
+            except HttpError as e:
+                if self._is_quota_exceeded(e):
+                    backoff_seconds = 3600
+                    self.quota_backoff_until = asyncio.get_running_loop().time() + backoff_seconds
+                    self.taglog("YouTube", f"Quota exceeded, backing off for {backoff_seconds} seconds: {e}")
+                else:
+                    self.taglog("YouTube", f"Error during polling: {e}")
             except Exception as e:
                 self.taglog("YouTube", f"Error during polling: {e}")
 
@@ -68,6 +80,50 @@ class YouTube:
         except RuntimeError as e:
             self.taglog("YouTube", f"Failed to schedule YouTube alert: {e}")
 
+    def _is_quota_exceeded(self, error: HttpError) -> bool:
+        try:
+            details = error.error_details or []
+        except AttributeError:
+            details = []
+
+        if any(detail.get("reason") == "quotaExceeded" for detail in details if isinstance(detail, dict)):
+            return True
+
+        return getattr(error.resp, "status", None) == 403 and "quota" in str(error).lower()
+
+    def _cache_channel_data(self, channel: dict, channel_id: str, channel_response: dict | None = None) -> None:
+        channel["channel_id"] = channel_id
+
+        if channel_response:
+            items = channel_response.get("items", [])
+            if items:
+                snippet = items[0].get("snippet", {})
+                thumbnails = snippet.get("thumbnails", {})
+                uploads_playlist_id = (
+                    items[0].get("contentDetails", {})
+                    .get("relatedPlaylists", {})
+                    .get("uploads")
+                )
+
+                if uploads_playlist_id:
+                    channel["uploads_playlist_id"] = uploads_playlist_id
+
+                channel["channel_title"] = snippet.get("title", channel.get("channel_title"))
+                channel["channel_image_url"] = (
+                    thumbnails.get("high", {}).get("url")
+                    or thumbnails.get("medium", {}).get("url")
+                    or thumbnails.get("default", {}).get("url")
+                )
+
+        self.social_config.register_new_content(channel)
+        self.set_config(self.config)
+
+    def _get_channel_details(self, channel_id: str) -> dict:
+        return self.youtube.channels().list(
+            part="snippet,contentDetails",
+            id=channel_id
+        ).execute()
+
     def _search_for_channel_id(self, query: str, expected_custom_url: str | None = None) -> str | None:
         self.taglog("YouTube", f"Searching for channel id with query {query}...")
 
@@ -100,14 +156,21 @@ class YouTube:
 
         return channel_ids[0]
 
-    def get_channel_id(self, url: str) -> str | None:
+    def get_channel_id(self, channel: dict) -> str | None:
+        cached_channel_id = channel.get("channel_id")
+        if cached_channel_id:
+            return cached_channel_id
+
+        url = channel.get("url")
         self.taglog("YouTube", f"Getting channel id from {url}...")
 
         path = urlparse(url).path
 
         # Case 1: already contains channel id
         if path.startswith("/channel/"):
-            return path.split("/")[2]
+            channel_id = path.split("/")[2]
+            self._cache_channel_data(channel, channel_id, self._get_channel_details(channel_id))
+            return channel_id
 
         # Case 2: handle @handle URLs
         if path.startswith("/@"):
@@ -121,12 +184,16 @@ class YouTube:
 
             items = resp.get("items", [])
             if items:
-                return items[0].get("id")
+                channel_id = items[0].get("id")
+                self._cache_channel_data(channel, channel_id, self._get_channel_details(channel_id))
+                return channel_id
 
             self.taglog("YouTube", f"No exact handle match for {handle}, falling back to search.")
             channel_id = self._search_for_channel_id(f"@{handle}", expected_custom_url=handle)
             if channel_id is None:
                 self.taglog("YouTube", f"No channel found for handle {handle}.")
+            else:
+                self._cache_channel_data(channel, channel_id, self._get_channel_details(channel_id))
             return channel_id
 
         # Case 3: custom URL /c/ or /user/
@@ -149,14 +216,22 @@ class YouTube:
                 self.taglog("YouTube", f"No channel found for username {name}.")
                 return None
 
-            return items[0].get("id")
+            channel_id = items[0].get("id")
+            self._cache_channel_data(channel, channel_id, self._get_channel_details(channel_id))
+            return channel_id
 
         channel_id = self._search_for_channel_id(name, expected_custom_url=name if kind == "c" else None)
         if channel_id is None:
             self.taglog("YouTube", f"No channel found for custom URL name {name}.")
+        else:
+            self._cache_channel_data(channel, channel_id, self._get_channel_details(channel_id))
         return channel_id
 
-    def get_playlist_id(self, channel_id: str) -> str | None:
+    def get_playlist_id(self, channel: dict, channel_id: str) -> str | None:
+        cached_playlist_id = channel.get("uploads_playlist_id")
+        if cached_playlist_id:
+            return cached_playlist_id
+
         self.taglog("YouTube", f"Getting latest upload playlist for {channel_id}...")
 
         # Example response found in .ref/youtube.latest_videos_playlist_respons.json
@@ -185,6 +260,9 @@ class YouTube:
             self._schedule_unexpected_youtube_state_notification(error_message)
             return None
 
+        channel["uploads_playlist_id"] = uploads_playlist_id
+        self.social_config.register_new_content(channel)
+        self.set_config(self.config)
         return uploads_playlist_id
     
     # Example response found in .ref/youtube.latest_video_response.json
@@ -230,14 +308,14 @@ class YouTube:
 
         for channel in self.social_config.youtube_channels or []:
             channel_url = channel.get("url", None)
-            channel_id = self.get_channel_id(channel_url)
+            channel_id = self.get_channel_id(channel)
             if channel_id is None:
                 error_message = f"Channel ID not found for configured YouTube channel URL: {channel_url}"
                 self.taglog("YouTube", error_message)
                 self._schedule_unexpected_youtube_state_notification(error_message)
                 continue
             
-            playlist_id = self.get_playlist_id(channel_id)
+            playlist_id = self.get_playlist_id(channel, channel_id)
             # Error is handled in get_playlist_id because we can include the response there, but if we
             # don't get a playlist_id here, move on.
             if playlist_id is None:
@@ -270,7 +348,7 @@ class YouTube:
             live_id = latest_live.get("id", {}).get("videoId", None)
             if notification_id != live_id:
                 self.taglog("YouTube", f"New live fetched for {channel_url}, send a social notification!")
-                message = await self.post_live_to_discord(latest_live, channel_url)
+                message = await self.post_live_to_discord(channel, latest_live, channel_url)
                 if message:
                     channel["last_live_notification"] = latest_live
                     channel["last_live_message_id"] = message.id
@@ -306,7 +384,7 @@ class YouTube:
         if last_video_notification and latest_upload:
             if last_video_notification.get("id", None) != latest_upload.get("id", None):
                 self.taglog("YouTube", f"New upload fetched for {channel_url}, send a social notification!")
-                if await self.post_upload_to_discord(latest_upload, channel_url):
+                if await self.post_upload_to_discord(channel, latest_upload, channel_url):
                     channel["last_video_notification"] = latest_upload
                     self.social_config.register_new_content(channel)
                     self.set_config(self.config)
@@ -315,21 +393,17 @@ class YouTube:
         
         self.taglog("YouTube", f"No new uploads fetched for {channel_url}...")
     
-    async def post_upload_to_discord(self, upload: dict, channel_url: str) -> bool:
+    async def post_upload_to_discord(self, channel: dict, upload: dict, channel_url: str) -> bool:
         upload_channel_id = self.social_config.upload_channel
         if upload_channel_id:
             discord_channel = self.bot.get_channel(upload_channel_id)
             if discord_channel:
                 snippet = upload.get("snippet", {})
-                youtube_channel_id = (
-                    snippet.get("channelId")
-                    or snippet.get("videoOwnerChannelId")
-                )
                 video_id = (
                     upload.get("contentDetails", {}).get("videoId")
                     or snippet.get("resourceId", {}).get("videoId")
                 )
-                channel_title = snippet.get("channelTitle", channel_url)
+                channel_title = channel.get("channel_title") or snippet.get("channelTitle", channel_url)
                 video_title = snippet.get("title", "New upload")
                 video_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else channel_url
                 thumbnails = snippet.get("thumbnails", {})
@@ -343,24 +417,7 @@ class YouTube:
                 published_at = snippet.get("publishedAt")
                 role_id = self.social_config.upload_notification_role
                 role_mention = f"<@&{role_id}>" if role_id else "@everyone"
-                author_icon_url = None
-
-                if youtube_channel_id:
-                    try:
-                        channel_response = self.youtube.channels().list(
-                            part="snippet",
-                            id=youtube_channel_id
-                        ).execute()
-                        channel_items = channel_response.get("items", [])
-                        if channel_items:
-                            channel_thumbnails = channel_items[0].get("snippet", {}).get("thumbnails", {})
-                            author_icon_url = (
-                                channel_thumbnails.get("high", {}).get("url")
-                                or channel_thumbnails.get("medium", {}).get("url")
-                                or channel_thumbnails.get("default", {}).get("url")
-                            )
-                    except Exception as e:
-                        self.taglog("YouTube", f"Failed to fetch channel avatar for {youtube_channel_id}: {e}")
+                author_icon_url = channel.get("channel_image_url")
 
                 embed = discord.Embed(
                     color=discord.Color.red(),
@@ -403,7 +460,7 @@ class YouTube:
             self.taglog("YouTube", "Upload notification channel is not configured.")
             return False
 
-    async def post_live_to_discord(self, live_video: dict, channel_url: str) -> discord.Message | None:
+    async def post_live_to_discord(self, channel: dict, live_video: dict, channel_url: str) -> discord.Message | None:
         live_channel_id = self.social_config.live_channel
         if not live_channel_id:
             self.taglog("YouTube", "Live notification channel is not configured.")
@@ -420,8 +477,7 @@ class YouTube:
             return None
 
         video_id = live_video.get("id", {}).get("videoId")
-        youtube_channel_id = snippet.get("channelId")
-        channel_title = snippet.get("channelTitle", channel_url)
+        channel_title = channel.get("channel_title") or snippet.get("channelTitle", channel_url)
         stream_title = snippet.get("title", "Live now on YouTube")
         video_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else channel_url
 
@@ -439,24 +495,7 @@ class YouTube:
 
         role_id = self.social_config.live_notification_role
         role_mention = f"<@&{role_id}>" if role_id else "@everyone"
-        author_icon_url = None
-
-        if youtube_channel_id:
-            try:
-                channel_response = self.youtube.channels().list(
-                    part="snippet",
-                    id=youtube_channel_id
-                ).execute()
-                channel_items = channel_response.get("items", [])
-                if channel_items:
-                    channel_thumbnails = channel_items[0].get("snippet", {}).get("thumbnails", {})
-                    author_icon_url = (
-                        channel_thumbnails.get("high", {}).get("url")
-                        or channel_thumbnails.get("medium", {}).get("url")
-                        or channel_thumbnails.get("default", {}).get("url")
-                    )
-            except Exception as e:
-                self.taglog("YouTube", f"Failed to fetch channel avatar for {youtube_channel_id}: {e}")
+        author_icon_url = channel.get("channel_image_url")
 
         embed = discord.Embed(
             color=discord.Color.red(),
