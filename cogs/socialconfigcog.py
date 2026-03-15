@@ -1,4 +1,5 @@
 import discord
+import asyncio
 from discord import app_commands
 from discord.ext import commands
 
@@ -68,6 +69,14 @@ class SocailConfigCog(commands.Cog):
 
             await interaction.response.send_message(message)
 
+            if self.bot.youtube:
+                self.bot.youtube.start_polling()
+                
+            if self.bot.twitch:
+                if hasattr(self.bot, "twitch_task") and self.bot.twitch_task is not None:
+                    self.bot.twitch_task.cancel()
+                self.bot.twitch_task = asyncio.create_task(self.bot.twitch.start())
+
     @app_commands.command(name='disablesocialnotifications', description='Disable notificaitons when a new video is posted.')
     async def disablesocialnotifications(self, interaction: discord.Interaction):
         self.taglog("SocailConfigCog", f"disablesocialnotifications")
@@ -75,6 +84,12 @@ class SocailConfigCog(commands.Cog):
             self.config.social_config.set_enabled(False)
             self.set_config(self.config)
             await interaction.response.send_message('Social notifications have been disabled.')
+
+            if self.bot.youtube:
+                self.bot.youtube.stop()
+
+            if self.bot.twitch:
+                await self.bot.twitch.stop()
 
     @app_commands.command(name='configureuploadnotifications', description='Configure how upload notifications are handled by the bot.')
     @app_commands.describe(channel='The channel in which to post new upload notifications.', role='The role to use to tag when posting the upload notification. If none is provided, @everyone will be used by default.')
@@ -130,6 +145,11 @@ class SocailConfigCog(commands.Cog):
                 message = self.config.social_config.configure_channel(url, enabled, lives)
                 if "Success" in message:
                     self.set_config(self.config)
+                    if self.config.social_config.get_url_platform(url) == "twitch" and self.bot.twitch is not None:
+                        await self.bot.twitch.stop()
+                        if hasattr(self.bot, "twitch_task") and self.bot.twitch_task is not None:
+                            self.bot.twitch_task.cancel()
+                        self.bot.twitch_task = asyncio.create_task(self.bot.twitch.start())
                 return await interaction.response.send_message(message)
             await interaction.response.send_message(f"{url} is not a valid Twitch or YouTube url.")
 

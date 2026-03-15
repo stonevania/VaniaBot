@@ -16,15 +16,20 @@ class YouTube:
 
         self.api_key = os.getenv("YOUTUBE_API_KEY")
         self.youtube = build("youtube", "v3", developerKey=self.api_key)
+        self.should_stop = False
         self.polling_task = None
 
     def start_polling(self):
+        self.should_stop = False
         if self.polling_task is None or self.polling_task.done():
             self.polling_task = asyncio.create_task(self.begin_polling())
 
+    def stop(self):
+        self.should_stop = True
+
     async def begin_polling(self):
         self.taglog("YouTube", "Starting YouTube polling...")
-        while True:
+        while not self.should_stop:
             try:
                 await self.check_for_new_content()
             except Exception as e:
@@ -93,8 +98,9 @@ class YouTube:
         return channel_ids[0]
 
     def get_channel_id(self, url: str) -> str | None:
-        path = urlparse(url).path
         self.taglog("YouTube", f"Getting channel id from {url}...")
+
+        path = urlparse(url).path
 
         # Case 1: already contains channel id
         if path.startswith("/channel/"):

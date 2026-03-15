@@ -1,5 +1,4 @@
 from pathlib import Path
-import os
 import logging
 
 script_dir = Path(__file__).parent

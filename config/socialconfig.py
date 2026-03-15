@@ -1,5 +1,5 @@
 from typing import List
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 class SocialConfig:
     def __init__(
@@ -37,14 +37,6 @@ class SocialConfig:
         self.enabled = enabled
         self.polling_interval = polling_interval
 
-        if not enabled:
-            self.upload_channel = None
-            self.live_channel = None
-            self.upload_notification_role = None
-            self.live_notification_role = None
-            self.youtube_channels = None
-            self.twitch_channels = None
-
     def configure_upload_notifications(self, channel_id, role_id):
         self.upload_channel = channel_id
         self.upload_notification_role = role_id
@@ -54,47 +46,51 @@ class SocialConfig:
         self.live_notification_role = role_id
 
     def _remove_channel_by_url(self, channels: List[dict], url: str) -> List[dict]:
+        normalized_url = self.normalize_url(url)
         return [
             item for item in channels or []
-            if item.get("url", None) != url
+            if self.normalize_url(item.get("url", "")) != normalized_url
         ]
 
     # Handles configuring any given channel by determining the platform and then adding the 
     # channel to the json in the proper format.
     def configure_channel(self, url: str, enabled: bool, lives: bool) -> str:
+        normalized_url = self.normalize_url(url)
+
         # If we're not enabling, we're disabling, so remove it if it exists
         if not enabled:
             old_channel_count = len(self.youtube_channels or []) + len(self.twitch_channels or [])
-            self.youtube_channels = self._remove_channel_by_url(self.youtube_channels, url)
-            self.twitch_channels = self._remove_channel_by_url(self.twitch_channels, url)
+            self.youtube_channels = self._remove_channel_by_url(self.youtube_channels, normalized_url)
+            self.twitch_channels = self._remove_channel_by_url(self.twitch_channels, normalized_url)
             new_channel_count = len(self.youtube_channels or []) + len(self.twitch_channels or [])
 
             if old_channel_count != new_channel_count:
-                return f"Success: Channel `{url}` was removed."
-            return f"Fail: Channel `{url}` is not currently monitored."
+                return f"Success: Channel `{normalized_url}` was removed."
+            return f"Fail: Channel `{normalized_url}` is not currently monitored."
         
         # Otherwise, determine platform then overwrite the appropriate values if it exists
         # or add if it doesn't
-        platform = self.get_url_platform(url)
+        platform = self.get_url_platform(normalized_url)
         if platform == "youtube":
             if not self.youtube_channels:
                 self.youtube_channels = []
 
             for channel in self.youtube_channels:
                 # If the channel is already monitored, update its values
-                if channel.get("url", None) == url:
+                if self.normalize_url(channel.get("url", "")) == normalized_url:
                     channel["lives"] = lives
-                    return f"Success: Updated `{url} [{channel}]`."
+                    channel["url"] = normalized_url
+                    return f"Success: Updated `{normalized_url} [{channel}]`."
             
             # Otherwise, add it as a new channel
             channel_json = {
-                "url": url,
+                "url": normalized_url,
                 "lives": lives,
                 "last_live_notification": None,
                 "last_video_notification": None
             }
             self.youtube_channels.append(channel_json)
-            return f"Success: Added `{url} [{channel_json}]`."
+            return f"Success: Added `{normalized_url} [{channel_json}]`."
         
         if platform == "twitch":
             if not self.twitch_channels:
@@ -102,19 +98,19 @@ class SocialConfig:
 
             for channel in self.twitch_channels:
                 # If the channel is already monitored, there's nothing to do but return a failure
-                if channel.get("url", None) == url:
-                    return f"Fail: Channel is already monitored `{url} [{channel}]`."
+                if self.normalize_url(channel.get("url", "")) == normalized_url:
+                    return f"Fail: Channel is already monitored `{normalized_url} [{channel}]`."
             
             # Otherwise, add it as a new channel
             channel_json = {
-                "url": url,
+                "url": normalized_url,
                 "last_live_notification": None,
                 "last_video_notification": None
             }
             self.twitch_channels.append(channel_json)
-            return f"Success: Added `{url} [{channel_json}]`."
+            return f"Success: Added `{normalized_url} [{channel_json}]`."
         
-        return f"Fail: Invalid platform [`{url}`]"
+        return f"Fail: Invalid platform [`{normalized_url}`]"
 
     def channel_list(self) -> str:
         length = len(self.twitch_channels or []) + len(self.youtube_channels or [])
@@ -137,6 +133,36 @@ class SocialConfig:
         message += "`"
 
         return message
+
+    def normalize_url(self, url: str) -> str:
+        parsed = urlparse(url.strip())
+        hostname = (parsed.netloc or "").lower()
+        path = parsed.path.rstrip("/")
+        query = parsed.query
+
+        normalized_url = url.strip().rstrip("/")
+        platform = self.get_url_platform(normalized_url)
+        if platform == "twitch":
+            login = path.strip("/").split("/")[0].lower()
+            return f"https://www.twitch.tv/{login}"
+
+        if platform == "youtube":
+            if hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+                if path.startswith("/@"):
+                    return f"https://www.youtube.com/{path.lower()}"
+                if path.startswith("/channel/") or path.startswith("/user/") or path.startswith("/c/"):
+                    segments = path.strip("/").split("/")
+                    return f"https://www.youtube.com/{'/'.join(segment.lower() for segment in segments)}"
+                if path == "/watch" and query:
+                    video_ids = parse_qs(query).get("v", [])
+                    if video_ids:
+                        return f"https://www.youtube.com/watch?v={video_ids[0]}"
+                return urlunparse(("https", "www.youtube.com", path, "", query, "")).rstrip("/")
+
+            if hostname == "youtu.be":
+                return urlunparse(("https", "youtu.be", path, "", query, "")).rstrip("/")
+
+        return normalized_url
 
     def get_url_platform(self, url: str) -> str | None:
         parsed = urlparse(url.strip())
@@ -161,7 +187,7 @@ class SocialConfig:
         return None
 
     def confirm_url(self, url: str) -> bool:
-        return self.get_url_platform(url) is not None
+        return self.get_url_platform(self.normalize_url(url)) is not None
     
     def register_new_content(self, channel: dict):
         channel_url = channel.get("url", None)

@@ -1,3 +1,4 @@
+import asyncio
 from dotenv import load_dotenv
 from discord.ext import commands
 import discord
@@ -276,15 +277,17 @@ async def on_ready():
     taglog("MAIN", f'Logged in as {bot.user.name} - {bot.user.id}')
     taglog("MAIN", 'Bot is ready to receive commands.')
 
-    # Start Twitch polling
     if not hasattr(bot, "twitch"):
         bot.twitch = Twitch(bot)
-    bot.twitch.start_polling()
 
-    # Start YouTube polling
     if not hasattr(bot, "youtube"):
         bot.youtube = YouTube(bot)
-    bot.youtube.start_polling()
+
+    if config.social_config.enabled:
+        if not hasattr(bot, "twitch_task") or bot.twitch_task.done():
+            bot.twitch_task = asyncio.create_task(bot.twitch.start())
+
+        bot.youtube.start_polling()
 
 # A user left or was removed from a guild
 # VaniaBot should only do something under the following conditions:
