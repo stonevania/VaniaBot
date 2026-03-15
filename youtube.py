@@ -44,7 +44,9 @@ class YouTube:
                 if self._is_quota_exceeded(e):
                     backoff_seconds = 3600
                     self.quota_backoff_until = asyncio.get_running_loop().time() + backoff_seconds
-                    self.taglog("YouTube", f"Quota exceeded, backing off for {backoff_seconds} seconds: {e}")
+                    message = f"YouTube request quota exceeded, backing off for {backoff_seconds} seconds"
+                    self.taglog("YouTube", f"{message} [{e}]")
+                    self._schedule_unexpected_youtube_state_notification(message)
                 else:
                     self.taglog("YouTube", f"Error during polling: {e}")
             except Exception as e:

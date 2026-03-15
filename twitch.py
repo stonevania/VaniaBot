@@ -58,6 +58,34 @@ class Twitch:
         dotenv.set_key(file_path, "TWITCH_USER_ACCESS_TOKEN", self.access_token)
         dotenv.set_key(file_path, "TWITCH_REFRESH_TOKEN", self.refresh_token)
 
+    async def _notify_unexpected_twitch_state(self, message: str):
+        reporting_channel_id = self.config.auto_moderation.reporting_channel
+
+        if reporting_channel_id:
+            channel = self.bot.get_channel(reporting_channel_id)
+            if channel:
+                try:
+                    await channel.send(f"**ERROR**: {message}")
+                    return
+                except Exception as e:
+                    self.taglog("Twitch", f"Failed to send auto-moderation alert: {e}")
+
+        for guild in self.bot.guilds:
+            owner = guild.owner or await guild.fetch_owner()
+            if owner is None:
+                continue
+
+            try:
+                await owner.send(f"VaniaBot detected an unexpected Twitch state in {guild.name}: {message}")
+            except Exception as e:
+                self.taglog("Twitch", f"Failed to DM guild owner for {guild.name}: {e}")
+
+    def _schedule_unexpected_twitch_state_notification(self, message: str):
+        try:
+            asyncio.create_task(self._notify_unexpected_twitch_state(message))
+        except RuntimeError as e:
+            self.taglog("Twitch", f"Failed to schedule Twitch alert: {e}")
+
     async def start(self):
         self.taglog("Twtich", "Starting Twtich event sub service...")
         self.twitch_channels = self.social_config.twitch_channels or []
@@ -85,20 +113,26 @@ class Twitch:
 
     def refresh_access_token(self) -> str:
         if not self.refresh_token:
-            raise RuntimeError("TWITCH_REFRESH_TOKEN is required to refresh the Twitch user access token.")
+            message = "TWITCH_REFRESH_TOKEN is required to refresh the Twitch user access token."
+            self._schedule_unexpected_twitch_state_notification(message)
+            raise RuntimeError(message)
 
-        response = requests.post(
-            "https://id.twitch.tv/oauth2/token",
-            params={
-                "grant_type": "refresh_token",
-                "refresh_token": self.refresh_token,
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response = requests.post(
+                "https://id.twitch.tv/oauth2/token",
+                params={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.refresh_token,
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                },
+                timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            self._schedule_unexpected_twitch_state_notification(f"Failed to refresh Twitch access token [{e}]")
+            raise
 
         self.access_token = data.get("access_token", self.access_token)
         self.refresh_token = data.get("refresh_token", self.refresh_token)
@@ -116,14 +150,18 @@ class Twitch:
         headers = {
             "Authorization": f"OAuth {self.access_token}"
         }
-        response = requests.get(url, headers=headers, timeout=20)
-        if response.status_code == 401 and self.refresh_token:
-            self.taglog("Twitch", "Twitch user token expired or invalid, refreshing it...")
-            self.refresh_access_token()
-            headers["Authorization"] = f"OAuth {self.access_token}"
+        try:
             response = requests.get(url, headers=headers, timeout=20)
-        response.raise_for_status()
-        data = response.json()
+            if response.status_code == 401 and self.refresh_token:
+                self.taglog("Twitch", "Twitch user token expired or invalid, refreshing it...")
+                self.refresh_access_token()
+                headers["Authorization"] = f"OAuth {self.access_token}"
+                response = requests.get(url, headers=headers, timeout=20)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            self._schedule_unexpected_twitch_state_notification(f"Failed to validate Twitch token [{e}]")
+            raise
         self.taglog("Twitch", f"Validated Twitch token for login={data.get("login")} client_id={data.get("client_id")}")
 
     def resolve_users(self):
@@ -156,8 +194,9 @@ class Twitch:
             user_display_name = user.get("display_name", None)
 
             if user_login is None or user_id is None or user_display_name is None:
-                # TODO: Register error to automod channel or guild owner for visibility
-                self.taglog("Twitch", f"Malformed user data in Twitch users response [{response.json()}]")
+                message = f"Malformed user data in Twitch users response [{response.json()}]"
+                self._schedule_unexpected_twitch_state_notification(message)
+                self.taglog("Twitch", message)
                 return 
             
             user_login = user_login.lower()
@@ -171,8 +210,9 @@ class Twitch:
 
         missing = users - found
         if missing and len(missing) > 0:
-            # TODO: Register error to automod channel or guild owner for visibility
-            self.taglog("Twitch", f"Malformed user data in Twitch users response [{response.json()}]")
+            message = f"Malformed user data in Twitch users response [{response.json()}]"
+            self._schedule_unexpected_twitch_state_notification(message)
+            self.taglog("Twitch", message)
             return 
         
         self.taglog("Twitch", f"Configured {len(found)} channels to monitor...")
@@ -192,7 +232,7 @@ class Twitch:
                             break
 
             except Exception as e:
-                # TODO: Register error to automod channel or guild owner for visibility
+                self._schedule_unexpected_twitch_state_notification(f"WebSocket loop error [{e}]")
                 self.taglog("Twitch", f"WebSocket loop error [{e}]")
                 await asyncio.sleep(5)
 
@@ -235,6 +275,9 @@ class Twitch:
         try:
             r.raise_for_status()
         except requests.HTTPError as e:
+            self._schedule_unexpected_twitch_state_notification(
+                f"Failed to create Twitch subscription [{broadcaster_user_id} | {sub_type} | {r.status_code}]"
+            )
             raise requests.HTTPError(
                 f"{e}. Twitch response: {r.text}",
                 response=r
@@ -283,6 +326,7 @@ class Twitch:
 
         if msg_type == "revocation":
             sub = payload["payload"].get("subscription", {})
+            self._schedule_unexpected_twitch_state_notification(f"Twitch subscription revoked [{sub}]")
             self.taglog("Twitch", f"Subscription revoked [{sub}]...")
             return None
 
@@ -333,12 +377,16 @@ class Twitch:
     async def send_discord_message(self, content: str, event: dict | None = None, is_live: bool = True) -> discord.Message | None:
         live_channel_id = self.social_config.live_channel
         if not live_channel_id:
-            self.taglog("Twitch", "Live notification channel is not configured.")
+            message = "Live notification channel is not configured."
+            self._schedule_unexpected_twitch_state_notification(message)
+            self.taglog("Twitch", message)
             return None
 
         discord_channel = self.bot.get_channel(live_channel_id)
         if not discord_channel:
-            self.taglog("Twitch", f"Live notification channel with ID {live_channel_id} not found.")
+            message = f"Live notification channel with ID {live_channel_id} not found."
+            self._schedule_unexpected_twitch_state_notification(message)
+            self.taglog("Twitch", message)
             return None
 
         event = event or {}
@@ -367,30 +415,42 @@ class Twitch:
         role_id = self.social_config.live_notification_role if is_live else None
         message_content = f"<@&{role_id}>" if role_id else "@everyone"
 
-        return await discord_channel.send(
-            content=message_content,
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
-        )
+        try:
+            return await discord_channel.send(
+                content=message_content,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
+            )
+        except Exception as e:
+            self._schedule_unexpected_twitch_state_notification(f"Failed to send Twitch Discord notification [{e}]")
+            raise
 
     async def update_discord_message(self, channel: dict | None, content: str, event: dict | None = None) -> None:
         if not channel:
-            self.taglog("Twitch", "Offline event received for an unconfigured channel.")
+            message = "Offline event received for an unconfigured channel."
+            self._schedule_unexpected_twitch_state_notification(message)
+            self.taglog("Twitch", message)
             return
 
         live_channel_id = self.social_config.live_channel
         if not live_channel_id:
-            self.taglog("Twitch", "Live notification channel is not configured.")
+            message = "Live notification channel is not configured."
+            self._schedule_unexpected_twitch_state_notification(message)
+            self.taglog("Twitch", message)
             return
 
         discord_channel = self.bot.get_channel(live_channel_id)
         if not discord_channel:
-            self.taglog("Twitch", f"Live notification channel with ID {live_channel_id} not found.")
+            message = f"Live notification channel with ID {live_channel_id} not found."
+            self._schedule_unexpected_twitch_state_notification(message)
+            self.taglog("Twitch", message)
             return
 
         message_id = channel.get("last_live_message_id")
         if not message_id:
-            self.taglog("Twitch", f"No existing live notification message found for {channel.get('url', None)}.")
+            message = f"No existing live notification message found for {channel.get('url', None)}."
+            self._schedule_unexpected_twitch_state_notification(message)
+            self.taglog("Twitch", message)
             return
 
         event = event or {}
@@ -409,14 +469,20 @@ class Twitch:
         try:
             message = await discord_channel.fetch_message(message_id)
         except discord.NotFound:
-            self.taglog("Twitch", f"Live notification message {message_id} was not found for {channel.get('url', None)}.")
+            notify_message = f"Live notification message {message_id} was not found for {channel.get('url', None)}."
+            self._schedule_unexpected_twitch_state_notification(notify_message)
+            self.taglog("Twitch", notify_message)
             return
 
-        await message.edit(
-            content=None,
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions.none()
-        )
+        try:
+            await message.edit(
+                content=None,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+        except Exception as e:
+            self._schedule_unexpected_twitch_state_notification(f"Failed to update Twitch Discord notification [{e}]")
+            raise
 
     def format_online_message(self, event: dict) -> str:
         name = event.get("broadcaster_user_name", event.get("broadcaster_user_login", "Unknown"))
