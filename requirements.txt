@@ -3,3 +3,5 @@ python-dotenv
 atproto
 asyncio
 google-api-python-client
+websockets
+requests

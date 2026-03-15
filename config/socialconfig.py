@@ -97,7 +97,22 @@ class SocialConfig:
             return f"Success: Added `{url} [{channel_json}]`."
         
         if platform == "twitch":
-            return "Fail: not implemented, yet"
+            if not self.twitch_channels:
+                self.twitch_channels = []
+
+            for channel in self.twitch_channels:
+                # If the channel is already monitored, there's nothing to do but return a failure
+                if channel.get("url", None) == url:
+                    return f"Fail: Channel is already monitored `{url} [{channel}]`."
+            
+            # Otherwise, add it as a new channel
+            channel_json = {
+                "url": url,
+                "last_live_notification": None,
+                "last_video_notification": None
+            }
+            self.twitch_channels.append(channel_json)
+            return f"Success: Added `{url} [{channel_json}]`."
         
         return f"Fail: Invalid platform [`{url}`]"
 
@@ -159,4 +174,7 @@ class SocialConfig:
             ]
 
         if platform == "twitch":
-            print("not implemented yet")
+           self.twitch_channels = [
+                channel if item.get("url") == channel_url else item
+                for item in self.twitch_channels or []
+            ]
