@@ -367,6 +367,23 @@ class Twitch:
 
         return live_streams
 
+    def get_live_stream(self, login: str) -> dict | None:
+        if not login:
+            return None
+
+        response = self.twitch_request(
+            "GET",
+            f"{TWITCH_HELIX_BASE}/streams",
+            params={"user_login": login}
+        )
+        response.raise_for_status()
+
+        data = response.json().get("data", [])
+        if not data:
+            return None
+
+        return data[0]
+
     async def sync_polled_channel_statuses(self) -> None:
         polled_channels = self.get_polled_channels()
         if not polled_channels:
@@ -527,14 +544,36 @@ class Twitch:
         login = event.get("broadcaster_user_login", "").lower()
         url = f"https://www.twitch.tv/{login}" if login else "https://www.twitch.tv"
         started_at = event.get("started_at")
+        stream = None
+
+        if is_live and login:
+            try:
+                stream = self.get_live_stream(login)
+            except Exception as e:
+                self.taglog("Twitch", f"Failed to fetch live stream details for {login}: {e}")
 
         embed = discord.Embed(
             description=content,
             color=discord.Color.purple() if is_live else discord.Color.dark_grey(),
             url=url
         )
-        embed.title = f"{name} is now live on Twitch" if is_live else f"{name} has gone offline"
-        embed.set_author(name=name, url=url)
+        if is_live:
+            stream_title = stream.get("title") if stream else None
+            game_name = stream.get("game_name") if stream else None
+            viewer_count = stream.get("viewer_count") if stream else None
+            thumbnail_url = stream.get("thumbnail_url") if stream else None
+
+            embed.title = stream_title or f"{name} is now live on Twitch"
+            embed.set_author(name=name, url=url)
+            if game_name:
+                embed.add_field(name="Game", value=game_name, inline=True)
+            if viewer_count is not None:
+                embed.add_field(name="Viewers", value=str(viewer_count), inline=True)
+            if thumbnail_url:
+                embed.set_image(url=thumbnail_url.replace("{width}", "1280").replace("{height}", "720"))
+        else:
+            embed.title = f"{name} has gone offline"
+            embed.set_author(name=name, url=url)
 
         if started_at:
             try:
@@ -544,15 +583,23 @@ class Twitch:
                     embed.set_footer(text="Started" if is_live else "Ended")
             except (ValueError, TypeError):
                 pass
+        elif is_live:
+            embed.set_footer(text="Live now")
 
         role_id = self.social_config.live_notification_role if is_live else None
         message_content = f"<@&{role_id}>" if role_id else "@everyone"
+        view = None
+
+        if is_live and login:
+            view = discord.ui.View()
+            view.add_item(discord.ui.Button(label="Watch Stream", url=url))
 
         try:
             return await discord_channel.send(
                 content=message_content,
                 embed=embed,
-                allowed_mentions=discord.AllowedMentions(roles=True, everyone=True)
+                allowed_mentions=discord.AllowedMentions(roles=True, everyone=True),
+                view=view
             )
         except Exception as e:
             self._schedule_unexpected_twitch_state_notification(f"Failed to send Twitch Discord notification [{e}]")
@@ -618,11 +665,9 @@ class Twitch:
             raise
 
     def format_online_message(self, event: dict) -> str:
-        name = event.get("broadcaster_user_name", event.get("broadcaster_user_login", "Unknown"))
         login = event.get("broadcaster_user_login", "").lower()
         url = f"https://www.twitch.tv/{login}" if login else "https://www.twitch.tv"
-        started_at = event.get("started_at", "unknown start time")
-        return f"🟣 **{name}** is now live on Twitch!\n{url}\nStarted: `{started_at}`"
+        return url
 
     def format_offline_message(self, event: dict) -> str:
         name = event.get("broadcaster_user_name", event.get("broadcaster_user_login", "Unknown"))
