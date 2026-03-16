@@ -11,6 +11,7 @@ import websockets
 
 TWITCH_EVENTSUB_WS_URL = "wss://eventsub.wss.twitch.tv/ws"
 TWITCH_HELIX_BASE = "https://api.twitch.tv/helix"
+TWITCH_EVENTSUB_MAX_CHANNELS = 10
 
 # # The Twitch channel login names to monitor. Will get these from config object
 # CHANNEL_LOGINS = [
@@ -36,6 +37,8 @@ class Twitch:
         self.twitch_channels = self.social_config.twitch_channels or []
         self.should_stop = False
         self.ws = None
+        self.polling_task = None
+        self.eventsub_logins: set[str] = set()
 
         # signal.signal(signal.SIGINT, self._stop_handler)
         # signal.signal(signal.SIGTERM, self._stop_handler)
@@ -90,14 +93,25 @@ class Twitch:
         self.taglog("Twtich", "Starting Twtich event sub service...")
         self.twitch_channels = self.social_config.twitch_channels or []
         self.channel_map = {}
+        self.eventsub_logins = set()
         self.should_stop = False
         self.validate_token()
         self.resolve_users()
-        await self.run_forever()
+        self.polling_task = asyncio.create_task(self.poll_for_offline_channels())
+
+        try:
+            await self.run_forever()
+        finally:
+            if self.polling_task is not None:
+                self.polling_task.cancel()
+                self.polling_task = None
     
     async def stop(self) -> None:
         self.taglog("Twtich", "Stopping Twtich event sub service...")
         self.should_stop = True
+        if self.polling_task is not None:
+            self.polling_task.cancel()
+            self.polling_task = None
         if self.ws is not None:
             await self.ws.close()
         await asyncio.sleep(1)
@@ -237,15 +251,18 @@ class Twitch:
                 await asyncio.sleep(5)
 
     def subscribe_all(self, session_id: str) -> None:
-        for login, user in self.channel_map.items():
+        self.eventsub_logins = set()
+
+        for login, user in list(self.channel_map.items())[:TWITCH_EVENTSUB_MAX_CHANNELS]:
             broadcaster_user_id = user["id"]
 
             result = self.create_subscription(session_id, broadcaster_user_id, "stream.online")
             self.taglog("Twitch", f"Subscribed to stream.online for {login} ({broadcaster_user_id}): {result}...")
+            self.eventsub_logins.add(login)
 
-            # Optional: also listen for stream.offline
-            result = self.create_subscription(session_id, broadcaster_user_id, "stream.offline")
-            self.taglog("Twitch", f"Subscribed to stream.offline for {login} ({broadcaster_user_id}): {result}...")
+        overflow_logins = list(self.channel_map.keys())[TWITCH_EVENTSUB_MAX_CHANNELS:]
+        if overflow_logins:
+            self.taglog("Twitch", f"Using polling for Twitch channels beyond EventSub limit: {overflow_logins}")
 
     def create_subscription(self, session_id: str, broadcaster_user_id: str, sub_type: str = "stream.online") -> dict:
         payload = {
@@ -299,6 +316,120 @@ class Twitch:
         self.social_config.register_new_content(channel)
         self.twitch_channels = self.social_config.twitch_channels or []
         self.set_config(self.config)
+
+    def clear_live_notification(self, channel: dict) -> None:
+        channel["last_live_notification"] = None
+        channel["last_live_message_id"] = None
+        self.social_config.register_new_content(channel)
+        self.twitch_channels = self.social_config.twitch_channels or []
+        self.set_config(self.config)
+
+    def get_active_live_channels(self) -> list[dict]:
+        return [
+            channel for channel in (self.twitch_channels or [])
+            if channel.get("last_live_notification") and channel.get("last_live_message_id")
+        ]
+
+    def get_polled_channels(self) -> list[dict]:
+        polled_channels = []
+
+        for channel in self.twitch_channels or []:
+            channel_url = channel.get("url", "")
+            login = urlparse(channel_url).path.strip("/").lower()
+            if login and login not in self.eventsub_logins:
+                polled_channels.append(channel)
+
+        return polled_channels
+
+    def get_live_streams(self, logins: list[str]) -> dict[str, dict]:
+        live_streams: dict[str, dict] = {}
+
+        for i in range(0, len(logins), 100):
+            batch = logins[i:i + 100]
+            params = [("user_login", login) for login in batch]
+            response = requests.get(
+                f"{TWITCH_HELIX_BASE}/streams",
+                headers=self.twitch_headers,
+                params=params,
+                timeout=20
+            )
+            response.raise_for_status()
+
+            for stream in response.json().get("data", []):
+                login = (stream.get("user_login") or "").lower()
+                if login:
+                    live_streams[login] = stream
+
+        return live_streams
+
+    async def sync_polled_channel_statuses(self) -> None:
+        polled_channels = self.get_polled_channels()
+        if not polled_channels:
+            return
+
+        logins = [
+            urlparse(channel.get("url", "")).path.strip("/").lower()
+            for channel in polled_channels
+        ]
+        live_streams = self.get_live_streams(logins)
+
+        for channel, login in zip(polled_channels, logins):
+            if not login:
+                continue
+
+            last_live_notification = channel.get("last_live_notification")
+
+            if login in live_streams and not last_live_notification:
+                stream = live_streams[login]
+                event = {
+                    "broadcaster_user_login": login,
+                    "broadcaster_user_name": stream.get("user_name") or self.channel_map.get(login, {}).get("display_name", login),
+                    "started_at": stream.get("started_at"),
+                }
+                self.taglog("Twitch", f"Polling detected new live for {channel.get('url', None)}, send a social notification!")
+                content = self.format_online_message(event)
+                message = await self.send_discord_message(content, event, is_live=True)
+                if message:
+                    self.save_live_notification(channel, event, message.id)
+                continue
+
+            if login not in live_streams and last_live_notification and channel.get("last_live_message_id"):
+                content = self.format_offline_message(last_live_notification)
+                self.taglog("Twitch", f"Offline poll detected [{content.replace('\n', ' | ')}]...")
+                await self.update_discord_message(channel, content, last_live_notification)
+                self.clear_live_notification(channel)
+
+    async def poll_for_offline_channels(self) -> None:
+        while not self.should_stop:
+            try:
+                await self.sync_polled_channel_statuses()
+
+                active_channels = self.get_active_live_channels()
+                eventsub_active_channels = [
+                    channel for channel in active_channels
+                    if urlparse(channel.get("url", "")).path.strip("/").lower() in self.eventsub_logins
+                ]
+                if eventsub_active_channels:
+                    logins = [
+                        urlparse(channel.get("url", "")).path.strip("/").lower()
+                        for channel in eventsub_active_channels
+                    ]
+                    live_streams = self.get_live_streams(logins)
+
+                    for channel, login in zip(eventsub_active_channels, logins):
+                        if login and login not in live_streams:
+                            last_live_notification = channel.get("last_live_notification") or {}
+                            content = self.format_offline_message(last_live_notification)
+                            self.taglog("Twitch", f"Offline poll detected [{content.replace('\n', ' | ')}]...")
+                            await self.update_discord_message(channel, content, last_live_notification)
+                            self.clear_live_notification(channel)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._schedule_unexpected_twitch_state_notification(f"Twitch offline polling error [{e}]")
+                self.taglog("Twitch", f"Twitch offline polling error [{e}]")
+
+            await asyncio.sleep(self.social_config.polling_interval or 60)
 
     async def handle_message(self, message: str) -> str | None:
         payload = json.loads(message)
@@ -360,6 +491,8 @@ class Twitch:
                 content = self.format_offline_message(event)
                 self.taglog("Twitch", f"Offline event [{content.replace("\n", " | ")}]...")
                 await self.update_discord_message(channel, content, event)
+                if channel:
+                    self.clear_live_notification(channel)
 
             else:
                 self.taglog("Twitch", f"Unhandled notification type [{sub_type}]...")

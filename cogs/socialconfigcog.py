@@ -11,6 +11,15 @@ class SocailConfigCog(commands.Cog):
         self.is_authorized = bot.is_authorized
         self.set_config = bot.set_config
 
+    async def _restart_twitch_service(self) -> None:
+        if self.bot.twitch is None:
+            return
+
+        await self.bot.twitch.stop()
+        if hasattr(self.bot, "twitch_task") and self.bot.twitch_task is not None:
+            self.bot.twitch_task.cancel()
+        self.bot.twitch_task = asyncio.create_task(self.bot.twitch.start())
+
     async def _authorize_interaction(self, interaction: discord.Interaction) -> bool:
         guild = interaction.guild
         if guild is None:
@@ -138,18 +147,20 @@ class SocailConfigCog(commands.Cog):
         enabled='Add or remove this channel from the list of monitored channels.', 
         url='The url of the channel to add or remove.', 
         lives='Should lives be posted? Default to true for Twitch and false for YouTube.')
-    async def configurechannel(self, interaction: discord.Interaction, url: str, enabled: bool, lives: bool = False):
+    async def configurechannel(self, interaction: discord.Interaction, url: str, enabled: bool = True, lives: bool = False):
         self.taglog("SocailConfigCog", f"configurechannel [{url} | {lives}]")
         if await self._authorize_interaction(interaction):
             if self.config.social_config.confirm_url(url):
                 message = self.config.social_config.configure_channel(url, enabled, lives)
                 if "Success" in message:
                     self.set_config(self.config)
-                    if self.config.social_config.get_url_platform(url) == "twitch" and self.bot.twitch is not None:
-                        await self.bot.twitch.stop()
-                        if hasattr(self.bot, "twitch_task") and self.bot.twitch_task is not None:
-                            self.bot.twitch_task.cancel()
-                        self.bot.twitch_task = asyncio.create_task(self.bot.twitch.start())
+                    should_restart_twitch = self.config.social_config.get_url_platform(url) == "twitch" and self.bot.twitch is not None
+                    if should_restart_twitch:
+                        message += "\nRestarting Twitch monitoring in the background."
+                    await interaction.response.send_message(message)
+                    if should_restart_twitch:
+                        asyncio.create_task(self._restart_twitch_service())
+                    return
                 return await interaction.response.send_message(message)
             await interaction.response.send_message(f"{url} is not a valid Twitch or YouTube url.")
 
