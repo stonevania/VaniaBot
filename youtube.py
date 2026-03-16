@@ -7,6 +7,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from urllib.parse import urlparse
 
+YOUTUBE_LIVE_POLL_INTERVAL_SECONDS = 1800
+
 class YouTube:
     def __init__(self, bot):
         self.bot = bot
@@ -20,6 +22,7 @@ class YouTube:
         self.should_stop = False
         self.polling_task = None
         self.quota_backoff_until = 0.0
+        self.last_live_poll_at = 0.0
 
         try:
             self.youtube = build("youtube", "v3", developerKey=self.api_key)
@@ -46,7 +49,10 @@ class YouTube:
                 now = asyncio.get_running_loop().time()
                 if self.quota_backoff_until > now:
                     await asyncio.sleep(self.quota_backoff_until - now)
-                await self.check_for_new_content()
+                poll_live = (now - self.last_live_poll_at) >= YOUTUBE_LIVE_POLL_INTERVAL_SECONDS
+                await self.check_for_new_content(poll_live=poll_live)
+                if poll_live:
+                    self.last_live_poll_at = now
             except HttpError as e:
                 if self._is_quota_exceeded(e):
                     backoff_seconds = 3600
@@ -314,7 +320,7 @@ class YouTube:
 
         return items[0]
     
-    async def check_for_new_content(self):
+    async def check_for_new_content(self, poll_live: bool = False):
         self.taglog("YouTube", "Checking for new content on monitored YouTube channels...")
 
         for channel in self.social_config.youtube_channels or []:
@@ -336,7 +342,7 @@ class YouTube:
             last_video_notification = channel.get("last_video_notification", None)
             await self.handle_new_upload(channel, last_video_notification, latest_upload)
 
-            if channel.get("lives", False):
+            if poll_live and channel.get("lives", False):
                 latest_live = self.get_latest_live(channel_id)
                 last_live_notification = channel.get("last_live_notification", None)
                 await self.handle_new_live(channel, last_live_notification, latest_live)

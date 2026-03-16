@@ -61,6 +61,14 @@ class Twitch:
         dotenv.set_key(file_path, "TWITCH_USER_ACCESS_TOKEN", self.access_token)
         dotenv.set_key(file_path, "TWITCH_REFRESH_TOKEN", self.refresh_token)
 
+    def twitch_request(self, method: str, url: str, **kwargs) -> requests.Response:
+        response = requests.request(method, url, headers=self.twitch_headers, timeout=20, **kwargs)
+        if response.status_code == 401 and self.refresh_token:
+            self.taglog("Twitch", f"Twitch API request unauthorized, refreshing token and retrying [{url}]")
+            self.refresh_access_token()
+            response = requests.request(method, url, headers=self.twitch_headers, timeout=20, **kwargs)
+        return response
+
     async def _notify_unexpected_twitch_state(self, message: str):
         reporting_channel_id = self.config.auto_moderation.reporting_channel
 
@@ -191,11 +199,10 @@ class Twitch:
             users.add(username)
             params.append(("login", username))
 
-        response = requests.get(
+        response = self.twitch_request(
+            "GET",
             f"{TWITCH_HELIX_BASE}/users",
-            headers=self.twitch_headers,
             params=params,
-            timeout=20
         )
         response.raise_for_status()
 
@@ -277,11 +284,10 @@ class Twitch:
             }
         }
 
-        r = requests.post(
+        r = self.twitch_request(
+            "POST",
             f"{TWITCH_HELIX_BASE}/eventsub/subscriptions",
-            headers=self.twitch_headers,
             json=payload,
-            timeout=20,
         )
 
         # Twitch may return 409 if the same subscription already exists.
@@ -347,11 +353,10 @@ class Twitch:
         for i in range(0, len(logins), 100):
             batch = logins[i:i + 100]
             params = [("user_login", login) for login in batch]
-            response = requests.get(
+            response = self.twitch_request(
+                "GET",
                 f"{TWITCH_HELIX_BASE}/streams",
-                headers=self.twitch_headers,
                 params=params,
-                timeout=20
             )
             response.raise_for_status()
 
