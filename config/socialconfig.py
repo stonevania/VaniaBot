@@ -155,7 +155,7 @@ class SocialConfig:
         if platform == "youtube":
             if hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
                 if path.startswith("/@"):
-                    return f"https://www.youtube.com/{path.lower()}"
+                    return f"https://www.youtube.com/{path.strip('/').lower()}"
                 if path.startswith("/channel/") or path.startswith("/user/") or path.startswith("/c/"):
                     segments = path.strip("/").split("/")
                     return f"https://www.youtube.com/{'/'.join(segment.lower() for segment in segments)}"
