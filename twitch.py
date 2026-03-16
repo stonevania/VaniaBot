@@ -339,16 +339,11 @@ class Twitch:
                 login = event.get("broadcaster_user_login", "").lower()
                 channel = self.get_configured_channel(login)
                 last_live_notification = channel.get("last_live_notification", None) if channel else None
+                notification_started_at = last_live_notification.get("started_at", None) if last_live_notification else None
 
-                if channel and event and not last_live_notification:
-                    self.taglog("Twitch", f"First ever live fetched for {channel.get('url', None)}, log and do nothing...")
-                    self.save_live_notification(channel, event)
-                    return None
-
-                if channel and last_live_notification and event:
-                    notification_started_at = last_live_notification.get("started_at", None)
+                if channel and event:
                     live_started_at = event.get("started_at", None)
-                    if notification_started_at != live_started_at:
+                    if notification_started_at is None or notification_started_at != live_started_at:
                         self.taglog("Twitch", f"New live fetched for {channel.get('url', None)}, send a social notification!")
                         content = self.format_online_message(event)
                         message = await self.send_discord_message(content, event, is_live=True)
