@@ -239,26 +239,36 @@ class Twitch:
         self.taglog("Twitch", f"Configured {len(found)} channels to monitor...")
 
     async def run_forever(self, ws_url: str = TWITCH_EVENTSUB_WS_URL) -> None:
+        current_ws_url = ws_url
+        reconnecting = False
+
         while not self.should_stop:
             try:
-                self.taglog("Twitch", f"Connecting to {ws_url}...")
-                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as websocket:
+                self.taglog("Twitch", f"Connecting to {current_ws_url}...")
+                async with websockets.connect(current_ws_url, ping_interval=20, ping_timeout=20) as websocket:
                     self.ws = websocket
 
                     async for raw_message in websocket:
-                        reconnect_url = await self.handle_message(raw_message)
+                        reconnect_url = await self.handle_message(raw_message, reconnecting=reconnecting)
                         if reconnect_url:
-                            ws_url = reconnect_url
-                            self.taglog("Twitch", f"Switching to reconnect URL {ws_url}...")
+                            current_ws_url = reconnect_url
+                            reconnecting = True
+                            self.taglog("Twitch", f"Switching to reconnect URL {current_ws_url}...")
                             break
+                    else:
+                        current_ws_url = TWITCH_EVENTSUB_WS_URL
+                        reconnecting = False
 
             except Exception as e:
                 self._schedule_unexpected_twitch_state_notification(f"WebSocket loop error [{e}]")
                 self.taglog("Twitch", f"WebSocket loop error [{e}]")
+                current_ws_url = TWITCH_EVENTSUB_WS_URL
+                reconnecting = False
                 await asyncio.sleep(5)
 
     def subscribe_all(self, session_id: str) -> None:
         self.eventsub_logins = set()
+        self.cleanup_stale_websocket_subscriptions(session_id)
 
         for login, user in list(self.channel_map.items())[:TWITCH_EVENTSUB_MAX_CHANNELS]:
             broadcaster_user_id = user["id"]
@@ -270,6 +280,58 @@ class Twitch:
         overflow_logins = list(self.channel_map.keys())[TWITCH_EVENTSUB_MAX_CHANNELS:]
         if overflow_logins:
             self.taglog("Twitch", f"Using polling for Twitch channels beyond EventSub limit: {overflow_logins}")
+
+    def get_eventsub_subscriptions(self) -> dict:
+        response = self.twitch_request(
+            "GET",
+            f"{TWITCH_HELIX_BASE}/eventsub/subscriptions",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def delete_eventsub_subscription(self, subscription_id: str) -> None:
+        response = self.twitch_request(
+            "DELETE",
+            f"{TWITCH_HELIX_BASE}/eventsub/subscriptions",
+            params={"id": subscription_id}
+        )
+        response.raise_for_status()
+
+    def cleanup_stale_websocket_subscriptions(self, session_id: str) -> None:
+        try:
+            subscriptions_response = self.get_eventsub_subscriptions()
+        except Exception as e:
+            self.taglog("Twitch", f"Failed to inspect existing EventSub subscriptions before subscribe [{e}]")
+            return
+
+        subscriptions = subscriptions_response.get("data", [])
+        total_cost = subscriptions_response.get("total_cost")
+        max_total_cost = subscriptions_response.get("max_total_cost")
+        self.taglog("Twitch", f"Current EventSub subscription cost [{total_cost}/{max_total_cost}]")
+
+        for subscription in subscriptions:
+            transport = subscription.get("transport", {})
+            subscription_session_id = transport.get("session_id")
+            subscription_id = subscription.get("id")
+            status = subscription.get("status")
+
+            if transport.get("method") != "websocket":
+                continue
+            if subscription_session_id == session_id:
+                continue
+            if status != "enabled":
+                continue
+            if not subscription_id:
+                continue
+
+            self.taglog(
+                "Twitch",
+                f"Deleting stale EventSub websocket subscription [{subscription_id} | {subscription.get('type')} | {subscription_session_id}]..."
+            )
+            try:
+                self.delete_eventsub_subscription(subscription_id)
+            except Exception as e:
+                self.taglog("Twitch", f"Failed to delete stale EventSub subscription {subscription_id}: {e}")
 
     def create_subscription(self, session_id: str, broadcaster_user_id: str, sub_type: str = "stream.online") -> dict:
         payload = {
@@ -453,7 +515,7 @@ class Twitch:
 
             await asyncio.sleep(self.social_config.polling_interval or 60)
 
-    async def handle_message(self, message: str) -> str | None:
+    async def handle_message(self, message: str, reconnecting: bool = False) -> str | None:
         payload = json.loads(message)
         metadata = payload.get("metadata", {})
         msg_type = metadata.get("message_type")
@@ -464,7 +526,8 @@ class Twitch:
             keepalive_timeout = session.get("keepalive_timeout_seconds")
             self.taglog("Twitch", f"Received session_welcome [{session_id} | {keepalive_timeout}]")
 
-            self.subscribe_all(session_id)
+            if not reconnecting:
+                self.subscribe_all(session_id)
             return None
 
         if msg_type == "session_keepalive":
