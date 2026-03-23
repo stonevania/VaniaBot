@@ -1,13 +1,19 @@
 import asyncio
 import os
 import discord
+import requests
 
 from datetime import datetime
+from xml.etree import ElementTree as ET
+from aiohttp import web
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from urllib.parse import urlparse
 
 YOUTUBE_LIVE_POLL_INTERVAL_SECONDS = 1800
+YOUTUBE_WEBSUB_HUB_URL = "https://pubsubhubbub.appspot.com/subscribe"
+YOUTUBE_WEBSUB_RENEW_INTERVAL_SECONDS = 43200
+ATOM_NAMESPACE = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
 
 class YouTube:
     def __init__(self, bot):
@@ -18,11 +24,18 @@ class YouTube:
         self.set_config = bot.set_config
 
         self.api_key = os.getenv("YOUTUBE_API_KEY")
+        self.websub_callback_url = os.getenv("YOUTUBE_WEBSUB_CALLBACK_URL")
+        self.websub_bind_host = os.getenv("YOUTUBE_WEBSUB_BIND_HOST", "0.0.0.0")
+        self.websub_bind_port = int(os.getenv("YOUTUBE_WEBSUB_PORT", "8080"))
+        self.websub_callback_path = urlparse(self.websub_callback_url).path or "/youtube/websub" if self.websub_callback_url else None
         self.youtube = None
         self.should_stop = False
         self.polling_task = None
         self.quota_backoff_until = 0.0
         self.last_live_poll_at = 0.0
+        self.last_websub_subscription_sync_at = 0.0
+        self.websub_runner = None
+        self.websub_site = None
 
         try:
             self.youtube = build("youtube", "v3", developerKey=self.api_key)
@@ -42,13 +55,23 @@ class YouTube:
         if self.polling_task is not None:
             self.polling_task.cancel()
 
+        if self.websub_runner is not None:
+            asyncio.create_task(self.stop_websub_server())
+
     async def begin_polling(self):
         self.taglog("YouTube", "Starting YouTube polling...")
+        await self.ensure_websub_server_started()
+        await self.sync_websub_subscriptions(force=True)
+
         while not self.should_stop:
             try:
                 now = asyncio.get_running_loop().time()
                 if self.quota_backoff_until > now:
                     await asyncio.sleep(self.quota_backoff_until - now)
+
+                if self.websub_callback_url and (now - self.last_websub_subscription_sync_at) >= YOUTUBE_WEBSUB_RENEW_INTERVAL_SECONDS:
+                    await self.sync_websub_subscriptions(force=True)
+
                 poll_live = (now - self.last_live_poll_at) >= YOUTUBE_LIVE_POLL_INTERVAL_SECONDS
                 await self.check_for_new_content(poll_live=poll_live)
                 if poll_live:
@@ -107,6 +130,161 @@ class YouTube:
             return True
 
         return getattr(error.resp, "status", None) == 403 and "quota" in str(error).lower()
+
+    async def ensure_websub_server_started(self) -> None:
+        if not self.websub_callback_url or self.websub_runner is not None:
+            return
+
+        app = web.Application()
+        app.router.add_get(self.websub_callback_path, self.handle_websub_verification)
+        app.router.add_post(self.websub_callback_path, self.handle_websub_notification)
+
+        self.websub_runner = web.AppRunner(app)
+        await self.websub_runner.setup()
+        self.websub_site = web.TCPSite(self.websub_runner, host=self.websub_bind_host, port=self.websub_bind_port)
+        await self.websub_site.start()
+        self.taglog(
+            "YouTube",
+            f"Started YouTube WebSub callback server on {self.websub_bind_host}:{self.websub_bind_port}{self.websub_callback_path}"
+        )
+
+    async def stop_websub_server(self) -> None:
+        if self.websub_runner is None:
+            return
+
+        await self.websub_runner.cleanup()
+        self.websub_runner = None
+        self.websub_site = None
+
+    def youtube_topic_url(self, channel_id: str) -> str:
+        return f"https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}"
+
+    def is_websub_enabled(self) -> bool:
+        return bool(self.websub_callback_url)
+
+    def get_channel_by_id(self, channel_id: str) -> dict | None:
+        for channel in self.social_config.youtube_channels or []:
+            if channel.get("channel_id") == channel_id:
+                return channel
+        return None
+
+    async def sync_websub_subscriptions(self, force: bool = False) -> None:
+        if not self.is_websub_enabled():
+            return
+
+        now = asyncio.get_running_loop().time()
+        if not force and (now - self.last_websub_subscription_sync_at) < YOUTUBE_WEBSUB_RENEW_INTERVAL_SECONDS:
+            return
+
+        for channel in self.social_config.youtube_channels or []:
+            channel_id = self.get_channel_id(channel)
+            if channel_id is None:
+                continue
+
+            try:
+                self.subscribe_to_websub_channel(channel_id)
+            except Exception as e:
+                self.taglog("YouTube", f"Failed to subscribe to WebSub for {channel_id}: {e}")
+                self._schedule_unexpected_youtube_state_notification(f"Failed to subscribe YouTube WebSub channel [{channel_id} | {e}]")
+
+        self.last_websub_subscription_sync_at = now
+
+    def subscribe_to_websub_channel(self, channel_id: str) -> None:
+        response = requests.post(
+            YOUTUBE_WEBSUB_HUB_URL,
+            data={
+                "hub.callback": self.websub_callback_url,
+                "hub.mode": "subscribe",
+                "hub.topic": self.youtube_topic_url(channel_id),
+                "hub.verify": "async",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+
+    async def handle_websub_verification(self, request: web.Request) -> web.Response:
+        challenge = request.query.get("hub.challenge")
+        mode = request.query.get("hub.mode")
+        topic = request.query.get("hub.topic")
+
+        if not challenge or not mode or not topic:
+            return web.Response(status=400, text="Missing hub verification parameters")
+
+        self.taglog("YouTube", f"Received WebSub verification [{mode} | {topic}]")
+        return web.Response(text=challenge, content_type="text/plain")
+
+    async def handle_websub_notification(self, request: web.Request) -> web.Response:
+        body = await request.text()
+
+        try:
+            feed = ET.fromstring(body)
+        except ET.ParseError as e:
+            self.taglog("YouTube", f"Failed to parse YouTube WebSub payload: {e}")
+            return web.Response(status=400, text="Invalid XML")
+
+        entry = feed.find("atom:entry", ATOM_NAMESPACE)
+        if entry is None:
+            return web.Response(status=204)
+
+        video_id = entry.findtext("yt:videoId", default="", namespaces=ATOM_NAMESPACE)
+        channel_id = entry.findtext("yt:channelId", default="", namespaces=ATOM_NAMESPACE)
+        title = entry.findtext("atom:title", default="New upload", namespaces=ATOM_NAMESPACE)
+        published_at = entry.findtext("atom:published", default=None, namespaces=ATOM_NAMESPACE)
+        author_name = entry.findtext("atom:author/atom:name", default=None, namespaces=ATOM_NAMESPACE)
+        link = entry.find("atom:link", ATOM_NAMESPACE)
+        video_url = link.get("href") if link is not None else None
+
+        if not video_id or not channel_id:
+            return web.Response(status=204)
+
+        channel = self.get_channel_by_id(channel_id)
+        if channel is None:
+            self.taglog("YouTube", f"Ignoring WebSub notification for unconfigured channel {channel_id}")
+            return web.Response(status=204)
+
+        await self.handle_websub_upload(channel, video_id, title, published_at, author_name, video_url)
+        return web.Response(status=204)
+
+    async def handle_websub_upload(
+        self,
+        channel: dict,
+        video_id: str,
+        title: str,
+        published_at: str | None,
+        author_name: str | None,
+        video_url: str | None,
+    ) -> None:
+        last_video_notification = channel.get("last_video_notification") or {}
+        if last_video_notification.get("id") == video_id:
+            self.taglog("YouTube", f"Ignoring duplicate WebSub upload notification for {video_id}")
+            return
+
+        channel_url = channel.get("url", None)
+        upload = {
+            "id": video_id,
+            "snippet": {
+                "title": title or "New upload",
+                "channelTitle": author_name or channel.get("channel_title") or channel_url,
+                "publishedAt": published_at,
+                "resourceId": {
+                    "videoId": video_id
+                },
+                "thumbnails": {
+                    "high": {
+                        "url": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                    }
+                },
+            },
+            "contentDetails": {
+                "videoId": video_id
+            },
+        }
+
+        self.taglog("YouTube", f"WebSub detected new upload for {channel_url}: {video_id}")
+        if await self.post_upload_to_discord(channel, upload, channel_url):
+            channel["last_video_notification"] = upload
+            self.social_config.register_new_content(channel)
+            self.set_config(self.config)
 
     def _cache_channel_data(self, channel: dict, channel_id: str, channel_response: dict | None = None) -> None:
         channel["channel_id"] = channel_id
@@ -337,10 +515,11 @@ class YouTube:
             # don't get a playlist_id here, move on.
             if playlist_id is None:
                 continue
-            
-            latest_upload = self.get_latest_upload(playlist_id)
-            last_video_notification = channel.get("last_video_notification", None)
-            await self.handle_new_upload(channel, last_video_notification, latest_upload)
+
+            if not self.is_websub_enabled():
+                latest_upload = self.get_latest_upload(playlist_id)
+                last_video_notification = channel.get("last_video_notification", None)
+                await self.handle_new_upload(channel, last_video_notification, latest_upload)
 
             if poll_live and channel.get("lives", False):
                 latest_live = self.get_latest_live(channel_id)
@@ -375,8 +554,16 @@ class YouTube:
                 return
 
         if last_live_notification and not latest_live:
-            self.taglog("YouTube", f"Live ended for {channel_url}, update the existing social notification!")
-            if await self.update_live_discord_message(channel, channel_url):
+            if channel.get("last_live_message_id"):
+                self.taglog("YouTube", f"Live ended for {channel_url}, update the existing social notification!")
+                if await self.update_live_discord_message(channel, channel_url):
+                    channel["last_live_notification"] = None
+                    channel["last_live_message_id"] = None
+                    self.social_config.register_new_content(channel)
+                    self.set_config(self.config)
+                    return
+            else:
+                self.taglog("YouTube", f"Live ended for {channel_url}, clearing cached live state with no Discord message to update.")
                 channel["last_live_notification"] = None
                 channel["last_live_message_id"] = None
                 self.social_config.register_new_content(channel)
